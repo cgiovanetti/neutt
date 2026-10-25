@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "neutt"
+dynamic = ["version"]
+description = "Differentiable JAX port of BURST's neutrino transport: N_eff and the neutrino spectra through weak decoupling"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+authors = [
+    { name = "Cara Giovanetti", email = "cgiovanetti@lbl.gov" },
+    { name = "Evan Grohs" },
+    { name = "George Fuller" },
+    { name = "Shasha Arani" },
+]
+keywords = ["cosmology", "neutrino decoupling", "N_eff", "big bang nucleosynthesis", "JAX"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Astronomy",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+dependencies = [
+    "jax>=0.8.1",
+    "equinox>=0.13",
+    "diffrax>=0.7.1",
+    "optimistix>=0.0.11",
+    "numpy>=2.0",
+    "scipy>=1.13",
+]
+
+[project.optional-dependencies]
+cuda12 = ["jax[cuda12]>=0.8.1"]
+test = ["pytest>=8"]
+docs = ["sphinx>=8", "furo", "myst-parser"]
+
+[tool.setuptools.dynamic]
+version = { attr = "neutt.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["neutt*"]
+
+[tool.pytest.ini_options]
+# Lets `import neutt` work from the repo without an editable install.
+pythonpath = ["."]
+testpaths = ["tests"]
+# `slow` = heavy hardening tests (full-kernel grad compiles, minutes each); deselected by
+# default to keep the routine suite fast. Run them with `pytest -m slow`.
+addopts = "-m 'not slow'"
+markers = [
+    "slow: expensive hardening tests (run explicitly with -m slow)",
+]
+filterwarnings = [
+    # cuda fabric/NVLink info warning on single-GPU nodes is benign
+    "ignore::DeprecationWarning",
+]
