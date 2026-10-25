@@ -51,8 +51,8 @@ from ... import compiling
 # si_gain_hist, si_nsub_hist) and the fine log-ε coherent state grid that resolves its collective mode
 # (coh_grid, coh_eps_low).  Uncommenting restores the mean field on the Boole grid.  coh_grid also needs
 # its restriction/prolongation at the collision edges and the pre-pin make_split_rates option
-# return_energy=True (not in this version); the complete pre-pin code is /pscratch/sd/c/carag/BURST_noise_runs/selfint_pin/full_coupled_prepin.py and
-# worktree_before_pin_2026-10-22.patch (against 430dfb3).  Physics status:
+# return_energy=True (not in this version); the complete pre-pin code is branch selfint-prepin of the
+# BURST repository (jaxburst names).  Physics status:
 # docs/HANDOFF_2026-10-12_QKE_STRIATIONS_EXPLAINED.md (branch dark).
 #
 # def _si_pack(nudiff, nusum):

@@ -6,3 +6,4 @@ __pycache__/
 docs/sphinx/_build/
 docs/sphinx/generated/
 .pytest_cache/
+.DS_Store

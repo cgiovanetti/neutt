@@ -15,5 +15,4 @@ Install with ``pip install neutt`` (CPU) or ``pip install "neutt[cuda12]"`` (NVI
 .. toctree::
    :maxdepth: 2
 
-   quickstart
    api
