@@ -142,7 +142,7 @@ _LAG_TAIL_GAP_PMA = 6.0
 
 
 def nuepma_rates(grid: EpsGrid, occ, meps, tcmpl, phie, n_gl: int = 5, n_lag: int = 5,
-                 fd_cap_logC: float = float("inf"), fd_decay: bool = False,
+                 range_limit=False, fd_cap_logC: float = float("inf"), fd_decay: bool = False,
                  monotone_read: bool = False,
                  lag_tail_fix: bool = True, lag_tail_gap: float = _LAG_TAIL_GAP_PMA):
     """νν̄ ↔ e⁻e⁺ rates, the reference implementation.
@@ -281,7 +281,8 @@ def nuepma_rates(grid: EpsGrid, occ, meps, tcmpl, phie, n_gl: int = 5, n_lag: in
                         femin_in = _fd(ein, tcmpl, phie, 1.0)        # (N,J,K)
                         fepl_in = _fd(ein, tcmpl, phie, -1.0)
                         p4 = jnp.maximum(eout[:, :, None] + ein - p1[:, None, None], 0.0)  # (N,J,K)
-                        fnu4 = jnp.exp(interp_log_occ_dynamic(logf, eps, p4, fd_cap_logC=fd_cap_logC, fd_decay=fd_decay,
+                        fnu4 = jnp.exp(interp_log_occ_dynamic(logf, eps, p4, range_limit=range_limit,
+                                                              fd_cap_logC=fd_cap_logC, fd_decay=fd_decay,
                                                               monotone_read=monotone_read))  # (3,2,N,J,K)
                         fnu4p = fnu4[:, ::-1]                          # partner ν̄ at opposite cp
 

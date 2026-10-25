@@ -198,7 +198,8 @@ def _pad_j(arr, j_pad: int, fill: float):
 # ---- runtime -----------------------------------------------------------------------------------
 
 def nunu_rates(kernel: NuNuKernel, occ, n_chunks: int | None = None,
-               fd_cap_logC: float = float("inf"), fd_decay: bool = False, monotone_read: bool = False):
+               fd_cap_logC: float = float("inf"), range_limit: bool = False,
+               fd_decay: bool = False, monotone_read: bool = False):
     """Net and forward+reverse ν–ν rates (net, frs), each (3, 2, N), per T_cm⁵.
 
     Summed over the partner flavour, the partner bin j and the p₃ quadrature; df/dt = T_cm⁵·net
@@ -214,6 +215,8 @@ def nunu_rates(kernel: NuNuKernel, occ, n_chunks: int | None = None,
     fd_cap_logC, fd_decay, monotone_read
         The off-grid closures of :mod:`neutt.interp`, used only by the QKE solver; the defaults are
         bitwise no-ops.
+    range_limit : bool
+        The window-max cap of :mod:`neutt.interp`, used only by the strong-χ dark path; default off.
     """
     N = kernel.nbins
     if n_chunks is None:
@@ -226,8 +229,8 @@ def nunu_rates(kernel: NuNuKernel, occ, n_chunks: int | None = None,
         brk3 = (kernel.brk_lo3, kernel.brk_hi3) if monotone_read else None
         brk4 = (kernel.brk_lo4, kernel.brk_hi4) if monotone_read else None
         # interpolated f at p₃, p₄, capped at C·FD(p)
-        f3 = jnp.exp(jnp.minimum(apply_log_interp(logf, kernel.idx3, kernel.lw3, fd_decay_base=fdd3, bracket=brk3), fd_cap_logC + kernel.fd_logFD3))  # leg 3
-        f4 = jnp.exp(jnp.minimum(apply_log_interp(logf, kernel.idx4, kernel.lw4, fd_decay_base=fdd4, bracket=brk4), fd_cap_logC + kernel.fd_logFD4))  # leg 4
+        f3 = jnp.exp(jnp.minimum(apply_log_interp(logf, kernel.idx3, kernel.lw3, range_limit=range_limit, fd_decay_base=fdd3, bracket=brk3), fd_cap_logC + kernel.fd_logFD3))  # leg 3
+        f4 = jnp.exp(jnp.minimum(apply_log_interp(logf, kernel.idx4, kernel.lw4, range_limit=range_limit, fd_decay_base=fdd4, bracket=brk4), fd_cap_logC + kernel.fd_logFD4))  # leg 4
 
         # F-tensor axes: (m=this flavor, p=partner flavor, n=cp, i=out bin, j=partner bin, k=slot)
         f1 = occ[:, None, :, :, None, None]      # (m,1,n,i,1,1)   leg 1: f(ε₁), this flavor
@@ -293,8 +296,8 @@ def nunu_rates(kernel: NuNuKernel, occ, n_chunks: int | None = None,
         fdd4 = fdd4_b if fd_decay else None
         brk3 = (bl3_b, bh3_b) if monotone_read else None
         brk4 = (bl4_b, bh4_b) if monotone_read else None
-        f3 = jnp.exp(jnp.minimum(apply_log_interp(logf, idx3_b, lw3_b, fd_decay_base=fdd3, bracket=brk3), fd_cap_logC + fd3_b))  # (m,n,i,jb,k)
-        f4 = jnp.exp(jnp.minimum(apply_log_interp(logf, idx4_b, lw4_b, fd_decay_base=fdd4, bracket=brk4), fd_cap_logC + fd4_b))  # (m,n,i,jb,k)
+        f3 = jnp.exp(jnp.minimum(apply_log_interp(logf, idx3_b, lw3_b, range_limit=range_limit, fd_decay_base=fdd3, bracket=brk3), fd_cap_logC + fd3_b))  # (m,n,i,jb,k)
+        f4 = jnp.exp(jnp.minimum(apply_log_interp(logf, idx4_b, lw4_b, range_limit=range_limit, fd_decay_base=fdd4, bracket=brk4), fd_cap_logC + fd4_b))  # (m,n,i,jb,k)
         f2 = occ_b[None, :, :, None, :, None]                   # (1,p,n,1,jb,1)
         f3b = f3[:, None]                                       # (m,1,n,i,jb,k)
         f4b = f4[None, :]                                       # (1,p,n,i,jb,k)

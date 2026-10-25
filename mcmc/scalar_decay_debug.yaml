@@ -1,0 +1,75 @@
+# Short BBN MCMC for an out-of-equilibrium scalar (majoron) -> nu decay.
+# New-physics params: scalar mass m_phi and injection strength log10_amp (frozen-in abundance);
+# the decay epoch (coupling g) is fixed so the scalar decays near ~100 keV. Baryon density omega_b
+# is sampled; LINX nuclear nuisances + tau_n are fixed (central) for this short demonstration.
+# Likelihood: Gaussian Yp + D/H (reused from ACT_BBN).
+
+output: /path/to/neutt/chains/scalar_decay_debug/scalar_decay_debug
+debug: false
+stop_at_error: false
+packages_path: /path/to/cobaya_packages
+
+likelihood:
+  bbn_gaussian:
+    class: likes.bbn_gaussian.BBNGaussian
+    python_path: /path/to/ACT_BBN
+    Yp_mean: 0.2458
+    Yp_sigma: 0.0013
+    DH_mean: 2.527
+    DH_sigma: 0.030
+
+theory:
+  theory_scalar_decay.scalar_decay_bbn:
+    python_path: /path/to/neutt/mcmc
+    stop_at_error: false
+    neutt_path: /path/to/neutt
+    linx_transport_path: /path/to/LINX-transport
+    linx_repo_path: /path/to/LINX
+    nbins: 257
+    eps_range: 25.0
+    T_init: 4.0
+    lna_max: 4.5            # ends before the T~28 keV stiff-dregs spike (~99% decayed); P3 diag
+    nuclear_net: key_PRIMAT_2023
+    # P3 diag: atol=1e-30 is the WORKING config (245 steps); looser atol makes the spike worse.
+    solver_atol: 1.0e-30
+    solver_implicit: false
+    g_fixed: 7.0e-12
+    provides: [BBN_Yp, BBN_DH, N_eff_BBN]
+
+params:
+  omega_b:
+    prior: {min: 0.019, max: 0.025}
+    ref: {dist: norm, loc: 0.02239, scale: 2.1e-4}
+    proposal: 1.0e-4
+    latex: \Omega_\mathrm{b} h^2
+  # m_phi restricted to the explicit-solver STABLE zone (P3 sweep: m<=1.5 OK, m>=2 collapses as
+  # the injected feature moves to high eps). This IS the "~1 MeV injection" target regime.
+  m_phi:
+    prior: {min: 0.6, max: 1.4}
+    ref: {dist: norm, loc: 1.0, scale: 0.12}
+    proposal: 0.08
+    latex: m_\phi\,[\mathrm{MeV}]
+  # amp capped at -1.5 (amp<=3e-2 => Delta N_eff<~0.2, the data-relevant range): excludes the
+  # extreme-injection corner that collapses the explicit solve at the m_phi prior edges (P3 N=257
+  # corner check). The posterior lives at low amp (BBN disfavors large injection) where all m are stable.
+  log10_amp:
+    prior: {min: -4.0, max: -1.5}
+    ref: {dist: norm, loc: -2.7, scale: 0.3}
+    proposal: 0.2
+    latex: \log_{10} A_\phi
+  N_eff_BBN:
+    latex: 'N_\mathrm{eff}^\mathrm{BBN}'
+  BBN_Yp:
+    latex: 'Y_\mathrm{P}'
+  BBN_DH:
+    latex: '(D/H)\times10^5'
+
+sampler:
+  mcmc:
+    drag: false
+    oversample_power: 0.0
+    proposal_scale: 1.9
+    max_samples: 8
+    Rminus1_stop: 0.01
+    Rminus1_cl_stop: 0.5
+    burn_in: 0

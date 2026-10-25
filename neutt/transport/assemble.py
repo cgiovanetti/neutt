@@ -52,7 +52,7 @@ def equilibrium_occ(grid: EpsGrid, xi=(0.0, 0.0, 0.0)) -> jnp.ndarray:
 
 
 def _all_kernel_rates(grid, occ, meps, tcmpl, phie, nunu_kernel, nunubar_kernel, use_sched=False,
-                      fd_cap_logC=float("inf"), lag_tail_fix=True,
+                      range_limit=False, fd_cap_logC=float("inf"), lag_tail_fix=True,
                       fd_decay=False, monotone_read=False):
     """(numer, denom, leg4), each (3, 2, N): Σnet and Σfrs over the five kernels, and the ν–e± nets.
 
@@ -61,7 +61,7 @@ def _all_kernel_rates(grid, occ, meps, tcmpl, phie, nunu_kernel, nunubar_kernel,
     """
     groups = _kernel_rate_groups(grid, occ, meps, tcmpl, phie,
                                  nunu_kernel, nunubar_kernel, use_sched,
-                                 fd_cap_logC=fd_cap_logC,
+                                 range_limit=range_limit, fd_cap_logC=fd_cap_logC,
                                  lag_tail_fix=lag_tail_fix, fd_decay=fd_decay,
                                  monotone_read=monotone_read)
     (net_nn, frs_nn, net_s, frs_s, net_a, frs_a,
@@ -74,7 +74,7 @@ def _all_kernel_rates(grid, occ, meps, tcmpl, phie, nunu_kernel, nunubar_kernel,
 
 def _kernel_rate_groups(grid: EpsGrid, occ, meps, tcmpl, phie,
                         nunu_kernel, nunubar_kernel, use_sched=False,
-                        fd_cap_logC=float("inf"), lag_tail_fix=True,
+                        range_limit=False, fd_cap_logC=float("inf"), lag_tail_fix=True,
                         fd_decay=False, monotone_read=False):
     """Per-kernel (net, frs) pairs, the terms of the gate sums and the sum rules.
 
@@ -87,12 +87,15 @@ def _kernel_rate_groups(grid: EpsGrid, occ, meps, tcmpl, phie,
 
     ``fd_cap_logC``, ``fd_decay`` and ``monotone_read`` are the off-grid closures of
     :mod:`neutt.interp`, used only by the QKE solver (the defaults are bitwise no-ops).
+    ``range_limit`` is the window-max cap of :mod:`neutt.interp`, used only by the strong-χ dark
+    path and only in the reference (``use_sched=False``) kernels.
     ``lag_tail_fix`` is the Gauss–Laguerre tail rule of nuer1/nuer2/nuepma.
     """
     occ = jnp.clip(occ, OCC_FLOOR, 1.0)
-    net_nn, frs_nn = nunu_rates(nunu_kernel, occ, fd_cap_logC=fd_cap_logC,
+    net_nn, frs_nn = nunu_rates(nunu_kernel, occ, range_limit=range_limit, fd_cap_logC=fd_cap_logC,
                                 fd_decay=fd_decay, monotone_read=monotone_read)
-    net_s, frs_s, net_a, frs_a = nunubar_rates(nunubar_kernel, occ, fd_cap_logC=fd_cap_logC, fd_decay=fd_decay,
+    net_s, frs_s, net_a, frs_a = nunubar_rates(nunubar_kernel, occ, range_limit=range_limit,
+                                               fd_cap_logC=fd_cap_logC, fd_decay=fd_decay,
                                                monotone_read=monotone_read)
     if use_sched:
         select = use_sched != "union"
@@ -106,33 +109,36 @@ def _kernel_rate_groups(grid: EpsGrid, occ, meps, tcmpl, phie,
                                               fd_cap_logC=fd_cap_logC, fd_decay=fd_decay,
                                               monotone_read=monotone_read, lag_tail_fix=lag_tail_fix)
     else:
-        net_r1, frs_r1 = nuer1_rates(grid, occ, meps, tcmpl, phie, fd_cap_logC=fd_cap_logC, fd_decay=fd_decay,
+        net_r1, frs_r1 = nuer1_rates(grid, occ, meps, tcmpl, phie, range_limit=range_limit,
+                                     fd_cap_logC=fd_cap_logC, fd_decay=fd_decay,
                                      monotone_read=monotone_read, lag_tail_fix=lag_tail_fix)
-        net_r2, frs_r2 = nuer2_rates(grid, occ, meps, tcmpl, phie, fd_cap_logC=fd_cap_logC, fd_decay=fd_decay,
+        net_r2, frs_r2 = nuer2_rates(grid, occ, meps, tcmpl, phie, range_limit=range_limit,
+                                     fd_cap_logC=fd_cap_logC, fd_decay=fd_decay,
                                      monotone_read=monotone_read, lag_tail_fix=lag_tail_fix)
-        net_pma, frs_pma = nuepma_rates(grid, occ, meps, tcmpl, phie, fd_cap_logC=fd_cap_logC, fd_decay=fd_decay,
+        net_pma, frs_pma = nuepma_rates(grid, occ, meps, tcmpl, phie, range_limit=range_limit,
+                                        fd_cap_logC=fd_cap_logC, fd_decay=fd_decay,
                                         monotone_read=monotone_read, lag_tail_fix=lag_tail_fix)
     return (net_nn, frs_nn, net_s, frs_s, net_a, frs_a,
             net_r1, frs_r1, net_r2, frs_r2, net_pma, frs_pma)
 
 
 def compute_prec_trans_at(grid: EpsGrid, nunu_kernel, nunubar_kernel, occ_eq, meps, tcmpl,
-                          phie=0.0, use_sched=False, lag_tail_fix=True):
+                          phie=0.0, use_sched=False, lag_tail_fix=True, range_limit=False):
     """Noise floor prec[3, 2, N] = ``|Σnet|/Σfrs`` of the five kernels at the equilibrium ``occ_eq``.
 
     At the given (meps, tcmpl, phie); :func:`compute_prec_trans` is BURST's static point.
-    ``PREC_FLOOR`` where Σfrs ≤ 0; the ε = 0 bin is 0.  ``lag_tail_fix`` as in :func:`assemble_rhs`,
-    so the floor is measured with the same kernels as the gated rates.
+    ``PREC_FLOOR`` where Σfrs ≤ 0; the ε = 0 bin is 0.  ``lag_tail_fix`` and ``range_limit`` as in
+    :func:`assemble_rhs`, so the floor is measured with the same kernels as the gated rates.
     """
     numer, denom, _ = _all_kernel_rates(grid, occ_eq, meps, tcmpl, phie,
                                         nunu_kernel, nunubar_kernel, use_sched,
-                                        lag_tail_fix=lag_tail_fix)
+                                        range_limit=range_limit, lag_tail_fix=lag_tail_fix)
     prec = jnp.where(denom > 0.0, jnp.abs(numer) / jnp.where(denom > 0.0, denom, 1.0), PREC_FLOOR)
     return jnp.where(grid.abscissas > 0.0, prec, 0.0)
 
 
 def compute_prec_trans(grid: EpsGrid, nunu_kernel, nunubar_kernel, xi=(0.0, 0.0, 0.0),
-                       use_sched=False, lag_tail_fix=True):
+                       use_sched=False, lag_tail_fix=True, range_limit=False):
     """BURST's static noise floor prec_trans[3, 2, N]: equilibrium, meps = 0, tcmpl = 1, phie = 0.
 
     It depends only on the grid and ``xi`` (per-flavour degeneracy, (3,), may be traced).  With a
@@ -142,13 +148,13 @@ def compute_prec_trans(grid: EpsGrid, nunu_kernel, nunubar_kernel, xi=(0.0, 0.0,
     """
     occ0 = jax.lax.optimization_barrier(equilibrium_occ(grid, xi))
     return compute_prec_trans_at(grid, nunu_kernel, nunubar_kernel, occ0, 0.0, 1.0, 0.0, use_sched,
-                                 lag_tail_fix)
+                                 lag_tail_fix, range_limit=range_limit)
 
 
 def assemble_rhs(grid: EpsGrid, occ, tcmev, tplmev, phie, prec_trans,
                  nunu_kernel, nunubar_kernel, nuratiotol: float = NURATIOTOL,
                  m_e_eff: float = M_ELECTRON, use_sched=False,
-                 gate_width: float = 0.0, lag_tail_fix=True):
+                 gate_width: float = 0.0, range_limit=False, lag_tail_fix=True):
     """Gated df/dt [s⁻¹] and plasma energy-exchange rate drhonudt [MeV⁴/s] (``trans_evolve``).
 
     Parameters
@@ -171,6 +177,8 @@ def assemble_rhs(grid: EpsGrid, occ, tcmev, tplmev, phie, prec_trans,
     gate_width : float
         0 = BURST's hard gate; > 0 replaces it by a sigmoid in log(test_ratio/nuratiotol) of this
         width (a continuous RHS).
+    range_limit : bool
+        Window-max cap on the off-grid reads (strong-χ dark path only; default off).
     lag_tail_fix : bool
         Gauss–Laguerre tail rule in nuer1/nuer2/nuepma (False = bit-faithful to BURST).
 
@@ -185,7 +193,7 @@ def assemble_rhs(grid: EpsGrid, occ, tcmev, tplmev, phie, prec_trans,
     tcmpl = tcmev / tplmev
     numer, denom, leg4 = _all_kernel_rates(grid, occ, meps, tcmpl, phie,
                                            nunu_kernel, nunubar_kernel, use_sched,
-                                           lag_tail_fix=lag_tail_fix)
+                                           range_limit=range_limit, lag_tail_fix=lag_tail_fix)
 
     test_ratio = jnp.where(denom != 0.0,
                            jnp.abs(numer) / jnp.where(denom != 0.0, denom, 1.0)
@@ -218,7 +226,7 @@ SPLIT_ONEMF_FLOOR = 1.0e-3  # floor on 1 − f in forf/(1 − f); exact for f �
 def assemble_split_rhs(grid: EpsGrid, occ, tcmev, tplmev, phie, prec_trans,
                        nunu_kernel, nunubar_kernel, nuratiotol: float = NURATIOTOL,
                        m_e_eff: float = M_ELECTRON, use_sched=False,
-                      fd_cap_logC=float("inf"), lag_tail_fix=True,
+                      range_limit=False, fd_cap_logC=float("inf"), lag_tail_fix=True,
                       fd_decay=False, monotone_read=False):
     """The gated RHS in affine form, df/dt = A − B·f with A, B ≥ 0 [s⁻¹], for the exponential step.
 
@@ -239,7 +247,7 @@ def assemble_split_rhs(grid: EpsGrid, occ, tcmev, tplmev, phie, prec_trans,
     tcmpl = tcmev / tplmev
     numer, denom, leg4 = _all_kernel_rates(grid, occ, meps, tcmpl, phie,
                                            nunu_kernel, nunubar_kernel, use_sched,
-                                           fd_cap_logC=fd_cap_logC,
+                                           range_limit=range_limit, fd_cap_logC=fd_cap_logC,
                                            lag_tail_fix=lag_tail_fix, fd_decay=fd_decay,
                                            monotone_read=monotone_read)
 

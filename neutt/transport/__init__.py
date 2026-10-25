@@ -7,6 +7,10 @@ against the occupations at runtime, and their assembly into the gated RHS (``ass
 - ``nuepma``  — νν̄ → e⁺e⁻.
 - ``qke``     — the flavour-density-matrix (QKE) sector.
 
+The dark-sector kernels are ``dv_nu`` (boson X ↔ νν̄ decay), ``chi_nu`` (χ–ν scattering and
+χχ̄ ↔ νν̄, the cut-based reference) and ``chi_brute`` (the same rates by brute-force quadrature,
+a small graph for the coupled solves).
+
 Each lepton kernel has a reference implementation (bit-faithful to BURST) and a scheduled one
 (one batched contraction over a per-regime tile schedule), selected by ``use_sched``.
 """

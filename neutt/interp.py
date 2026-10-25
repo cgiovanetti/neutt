@@ -18,18 +18,43 @@ bit-faithful to BURST and uses none of the closures below; the QKE solve needs t
   QKE's "srcfix" closure; ``monotone_read`` alone holds the tail flat);
 - ``fd_cap_logC``: the absolute envelope f ≤ C·FD(q), log C finite (``FD_ENVELOPE_C``, env var
   ``NEUTT_FD_ENVELOPE_C``); +inf, the default, is a bitwise no-op.
+
+The dark sectors add four more options, all off by default (the SM path is bit-identical with them
+off): ``range_limit`` (cap the polynomial at its window's largest node, a limiter that bounds the
+extrapolation without clipping a genuinely super-thermal injection; the strong-χ path),
+``clamp_high=False`` (floor-only clamp, for a boson spectrum with f > 1), ``smooth_floor`` (a C¹
+softplus clamp in place of the hard one; strong-χ) and ``off_grid_mode`` (``"linear"`` or
+``"floor"`` above the grid edge; the decay kernels).
 """
 
 from __future__ import annotations
 
 import os
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 
 ORDPOLINT = 5           # order-5 polynomial → 6-point window
 LOG_OCC_CLAMP = -300.0  # BURST's interp_occfrac clamp value
 FD_ENVELOPE_C = float(os.environ.get("NEUTT_FD_ENVELOPE_C", "10.0"))
+
+
+def _smooth_clamp_log(win, scale, clamp_high):
+    """C¹ replacement for the hard log-occupation clamp (opt-in; the strong-χ path).
+
+    The hard clamp has a derivative jump at −300 (and at 0) that stalls the adaptive stepper as a χ
+    bin is Boltzmann-suppressed through the floor.  A softplus gives a smooth max(win, −300) of
+    width ``scale`` (log-occupation units; it only moves values within a few ``scale`` of −300) and,
+    for fermions (``clamp_high``), a smooth min(·, 0) of fixed width 0.05.  NaN → −300; scale → 0
+    recovers the hard clamp.
+    """
+    win = jnp.where(jnp.isnan(win), LOG_OCC_CLAMP, win)
+    win = LOG_OCC_CLAMP + scale * jax.nn.softplus((win - LOG_OCC_CLAMP) / scale)
+    if clamp_high:
+        hi = 0.05
+        win = -hi * jax.nn.softplus(-win / hi)
+    return win
 
 
 def _indpolint_start0(abscissas: np.ndarray, x: np.ndarray, ord: int = ORDPOLINT) -> np.ndarray:
@@ -63,17 +88,20 @@ def lagrange_window(abscissas, query, ord: int = ORDPOLINT):
     return idx, weights
 
 
-def apply_log_interp(logf_grid, idx, weights, fd_decay_base=None, bracket=None):
+def apply_log_interp(logf_grid, idx, weights, range_limit=False, fd_decay_base=None, bracket=None):
     """Clamped log f at precomputed windows: ``logf_grid`` (..., N) → (...,) + S.
 
     ``bracket = (lo, hi)`` index arrays enable the monotone read; ``fd_decay_base`` (point-shape S,
     +inf on grid, ``fd_logFD(q) + logaddexp(x_max, 0)`` off grid; built by the ν–ν kernel builders)
-    enables the FD-decay closure.  The FD-envelope cap is applied by the caller.
+    enables the FD-decay closure; ``range_limit`` caps the polynomial at its window's largest node
+    (dark sectors only).  The FD-envelope cap is applied by the caller.
     """
     idx = jnp.asarray(idx)
     weights = jnp.asarray(weights)
     gathered = logf_grid[..., idx]
     out = jnp.sum(weights * gathered, axis=-1)
+    if range_limit:
+        out = jnp.minimum(out, jnp.max(gathered, axis=-1))
     if bracket is not None:
         b_lo, b_hi = bracket
         v_lo = logf_grid[..., b_lo]
@@ -101,7 +129,9 @@ def _lagrange_weights_at(nodes, q):
 
 
 def interp_log_occ_dynamic(logf_grid, abscissas, query, ord: int = ORDPOLINT,
-                           fd_cap_logC: float = float("inf"), fd_decay: bool = False,
+                           clamp_high: bool = True, smooth_floor: float = 0.0,
+                           range_limit: bool = False, fd_cap_logC: float = float("inf"),
+                           off_grid_mode: str = "default", fd_decay: bool = False,
                            monotone_read: bool = False):
     """log f of a fermion spectrum at traced query momenta, BURST's three branches.
 
@@ -109,6 +139,15 @@ def interp_log_occ_dynamic(logf_grid, abscissas, query, ord: int = ORDPOLINT,
     last two nodes (capped at 0); q ≥ 300: −300.  ``logf_grid`` is (..., N), ``query`` any shape S;
     returns (...,) + S.  ``fd_cap_logC``, ``fd_decay`` and ``monotone_read`` are the closures of the
     module docstring.
+
+    The dark-sector options (defaults leave the SM read unchanged):
+
+    - ``clamp_high=False``: a boson spectrum (f > 1 allowed): floor-only clamp, the linear branch
+      uncapped, and neither ``fd_cap_logC`` nor ``fd_decay`` applied (both are fermion envelopes);
+    - ``smooth_floor > 0``: the C¹ softplus clamp of that width in place of the hard one;
+    - ``range_limit``: cap the polynomial at its window's largest node;
+    - ``off_grid_mode``: ``"linear"`` reads linear-in-log f from x_max (not 2·x_max) up, ``"floor"``
+      sends every read above x_max to −300; ``"default"`` is BURST's three branches.
     """
     abscissas = jnp.asarray(abscissas)
     N = abscissas.shape[0]
@@ -124,26 +163,43 @@ def interp_log_occ_dynamic(logf_grid, abscissas, query, ord: int = ORDPOLINT,
     lw = _lagrange_weights_at(nodes, q)
     gathered = logf_grid[..., idx]
     win = jnp.sum(lw * gathered, axis=-1)
+    if range_limit:
+        win = jnp.minimum(win, jnp.max(gathered, axis=-1))
     if monotone_read:
         lo = jnp.clip(jl - 1, 0, N - 1)
         hi = jnp.clip(jl, 0, N - 1)
         b_lo = logf_grid[..., lo]
         b_hi = logf_grid[..., hi]
         win = jnp.clip(win, jnp.minimum(b_lo, b_hi), jnp.maximum(b_lo, b_hi))
-    win = jnp.where((win < LOG_OCC_CLAMP) | (win > 0.0) | jnp.isnan(win), LOG_OCC_CLAMP, win)
+    if smooth_floor > 0.0:
+        win = _smooth_clamp_log(win, smooth_floor, clamp_high)
+    elif clamp_high:
+        win = jnp.where((win < LOG_OCC_CLAMP) | (win > 0.0) | jnp.isnan(win), LOG_OCC_CLAMP, win)
+    else:
+        win = jnp.where((win < LOG_OCC_CLAMP) | jnp.isnan(win), LOG_OCC_CLAMP, win)
 
     lead = logf_grid.shape[:-1]
     x0, x1 = abscissas[-2], abscissas[-1]
     y0 = logf_grid[..., -2].reshape(lead + (1,) * q.ndim)
     y1 = logf_grid[..., -1].reshape(lead + (1,) * q.ndim)
     lin = y0 + (y1 - y0) / (x1 - x0) * (q - x0)
-    lin = jnp.where(jnp.isnan(lin), LOG_OCC_CLAMP, jnp.minimum(lin, 0.0))
+    if clamp_high:
+        if smooth_floor > 0.0:
+            lin = _smooth_clamp_log(lin, smooth_floor, True)
+        else:
+            lin = jnp.where(jnp.isnan(lin), LOG_OCC_CLAMP, jnp.minimum(lin, 0.0))
 
     xmax = abscissas[-1]
-    out = jnp.where(q <= 2.0 * xmax, win, jnp.where(q < 300.0, lin, LOG_OCC_CLAMP))
-    out = jnp.minimum(out, fd_cap_logC - jnp.logaddexp(q, 0.0))
-    if fd_decay:
-        logf_edge = logf_grid[..., -1].reshape(logf_grid.shape[:-1] + (1,) * q.ndim)
-        fd_tail = (logf_edge + jnp.logaddexp(xmax, 0.0)) - jnp.logaddexp(q, 0.0)
-        out = jnp.where(q > xmax, jnp.minimum(out, fd_tail), out)
+    if off_grid_mode == "linear":
+        out = jnp.where(q <= xmax, win, jnp.where(q < 300.0, lin, LOG_OCC_CLAMP))
+    elif off_grid_mode == "floor":
+        out = jnp.where(q <= xmax, win, LOG_OCC_CLAMP)
+    else:
+        out = jnp.where(q <= 2.0 * xmax, win, jnp.where(q < 300.0, lin, LOG_OCC_CLAMP))
+    if clamp_high:
+        out = jnp.minimum(out, fd_cap_logC - jnp.logaddexp(q, 0.0))
+        if fd_decay:
+            logf_edge = logf_grid[..., -1].reshape(logf_grid.shape[:-1] + (1,) * q.ndim)
+            fd_tail = (logf_edge + jnp.logaddexp(xmax, 0.0)) - jnp.logaddexp(q, 0.0)
+            out = jnp.where(q > xmax, jnp.minimum(out, fd_tail), out)
     return out

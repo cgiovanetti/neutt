@@ -1,0 +1,40 @@
+# Pipeline smoke: ONE full evaluation of the scalar-decay BBN theory + likelihood at the ref
+# point (cobaya 'evaluate' sampler). Fast N=101 to validate the wrapper end-to-end (theory ->
+# make_coupled_bbn -> run -> Yp/DH/Neff -> Gaussian logp). Not a chain.
+output: /path/to/neutt/chains/scalar_decay_test/scalar_decay_test
+debug: false
+stop_at_error: true
+packages_path: /path/to/cobaya_packages
+
+likelihood:
+  bbn_gaussian:
+    class: likes.bbn_gaussian.BBNGaussian
+    python_path: /path/to/ACT_BBN
+
+theory:
+  theory_scalar_decay.scalar_decay_bbn:
+    python_path: /path/to/neutt/mcmc
+    stop_at_error: true
+    neutt_path: /path/to/neutt
+    linx_transport_path: /path/to/LINX-transport
+    linx_repo_path: /path/to/LINX
+    nbins: 101                # fast pipeline smoke (production uses the yaml's larger grid)
+    eps_range: 25.0
+    T_init: 4.0
+    lna_max: 4.5
+    nuclear_net: key_PRIMAT_2023
+    solver_atol: 1.0e-30
+    solver_implicit: false
+    g_fixed: 7.0e-12
+    provides: [BBN_Yp, BBN_DH, N_eff_BBN]
+
+params:
+  omega_b: 0.02239
+  m_phi: 1.0
+  log10_amp: -2.5
+  N_eff_BBN: {latex: 'N_\mathrm{eff}^\mathrm{BBN}'}
+  BBN_Yp: {latex: 'Y_\mathrm{P}'}
+  BBN_DH: {latex: '(D/H)\times10^5'}
+
+sampler:
+  evaluate:

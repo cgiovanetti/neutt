@@ -138,7 +138,8 @@ def build_nunubar_kernel(grid: EpsGrid, n_gl: int = 5, ordpolint: int = 5) -> Nu
 
 
 def nunubar_rates(kernel: NuNuBarKernel, occ, n_chunks: int | None = None,
-                  fd_cap_logC: float = float("inf"), fd_decay: bool = False, monotone_read: bool = False):
+                  fd_cap_logC: float = float("inf"), range_limit: bool = False,
+                  fd_decay: bool = False, monotone_read: bool = False):
     """ν–ν̄ rates (net_s, frs_s, net_a, frs_a), each (3, 2, N), per T_cm⁵.
 
     Scattering and annihilation, summed over the partner (produced) flavour, the partner bin j and
@@ -157,8 +158,8 @@ def nunubar_rates(kernel: NuNuBarKernel, occ, n_chunks: int | None = None,
         brk3 = (kernel.brk_lo3, kernel.brk_hi3) if monotone_read else None
         brk4 = (kernel.brk_lo4, kernel.brk_hi4) if monotone_read else None
         # interpolated f at p₃, p₄, capped at C·FD(p)
-        f3 = jnp.exp(jnp.minimum(apply_log_interp(logf, kernel.idx3, kernel.lw3, fd_decay_base=fdd3, bracket=brk3), fd_cap_logC + kernel.fd_logFD3))  # (flavor,cp,i,j,k)
-        f4 = jnp.exp(jnp.minimum(apply_log_interp(logf, kernel.idx4, kernel.lw4, fd_decay_base=fdd4, bracket=brk4), fd_cap_logC + kernel.fd_logFD4))
+        f3 = jnp.exp(jnp.minimum(apply_log_interp(logf, kernel.idx3, kernel.lw3, range_limit=range_limit, fd_decay_base=fdd3, bracket=brk3), fd_cap_logC + kernel.fd_logFD3))  # (flavor,cp,i,j,k)
+        f4 = jnp.exp(jnp.minimum(apply_log_interp(logf, kernel.idx4, kernel.lw4, range_limit=range_limit, fd_decay_base=fdd4, bracket=brk4), fd_cap_logC + kernel.fd_logFD4))
         f3o = f3[:, ::-1]                                           # opposite-cp interp at p₃
 
         Wb = kernel.W[None, None, None]                            # (1,1,1,i,j,k)
@@ -233,8 +234,8 @@ def nunubar_rates(kernel: NuNuBarKernel, occ, n_chunks: int | None = None,
         fdd4 = fdd4_b if fd_decay else None
         brk3 = (bl3_b, bh3_b) if monotone_read else None
         brk4 = (bl4_b, bh4_b) if monotone_read else None
-        f3 = jnp.exp(jnp.minimum(apply_log_interp(logf, idx3_b, lw3_b, fd_decay_base=fdd3, bracket=brk3), fd_cap_logC + fd3_b))  # (m,n,i,jb,k)
-        f4 = jnp.exp(jnp.minimum(apply_log_interp(logf, idx4_b, lw4_b, fd_decay_base=fdd4, bracket=brk4), fd_cap_logC + fd4_b))
+        f3 = jnp.exp(jnp.minimum(apply_log_interp(logf, idx3_b, lw3_b, range_limit=range_limit, fd_decay_base=fdd3, bracket=brk3), fd_cap_logC + fd3_b))  # (m,n,i,jb,k)
+        f4 = jnp.exp(jnp.minimum(apply_log_interp(logf, idx4_b, lw4_b, range_limit=range_limit, fd_decay_base=fdd4, bracket=brk4), fd_cap_logC + fd4_b))
         f3o = f3[:, ::-1]                                    # opposite-cp interp at p₃
         Wb = W_b[None, None, None]                           # (1,1,1,i,jb,k)
 

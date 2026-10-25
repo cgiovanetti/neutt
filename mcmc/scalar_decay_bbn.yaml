@@ -1,0 +1,98 @@
+# Short BBN MCMC for an out-of-equilibrium scalar (majoron) -> nu decay.
+# New-physics params: scalar mass m_phi and injection strength log10_amp (frozen-in abundance);
+# the decay epoch (coupling g) is fixed so the scalar decays near ~100 keV. Baryon density omega_b
+# is sampled; LINX nuclear nuisances + tau_n are fixed (central) for this short demonstration.
+# Likelihood: Gaussian Yp + D/H (reused from ACT_BBN).
+
+output: /path/to/neutt/chains/scalar_decay_bbn/scalar_decay_bbn
+debug: false
+stop_at_error: false
+packages_path: /path/to/cobaya_packages
+
+likelihood:
+  bbn_gaussian:
+    class: likes.bbn_gaussian.BBNGaussian
+    python_path: /path/to/ACT_BBN
+    Yp_mean: 0.2458
+    Yp_sigma: 0.0013
+    DH_mean: 2.527
+    DH_sigma: 0.030
+
+theory:
+  theory_scalar_decay.scalar_decay_bbn:
+    python_path: /path/to/neutt/mcmc
+    stop_at_error: false
+    neutt_path: /path/to/neutt
+    linx_transport_path: /path/to/LINX-transport
+    linx_repo_path: /path/to/LINX
+    # GRID (2026-06-21, OOE_decay3): N=101 (not 257) + eps_range=30. The two-leg decay-tail phase-2
+    # step count explodes with N; N=101 is ~10 s/pt warm and N-converged with 257 to 5 digits.
+    nbins: 101
+    eps_range: 30.0
+    T_init: 4.0
+    lna_max: 5.5           # caps the two-leg phase-2 feature-edge stop (lna_stop=min(computed,lna_max))
+    nuclear_net: key_PRIMAT_2023
+    solver_atol: 1.0e-30   # phase-1 SM-faithful pure-relative norm (reproduces the 3.04427 pin)
+    solver_implicit: false
+    solver_max_steps: 50000
+    # two-leg out-of-eq DECAY-tail solve (captures the FULL late decay; the old lna_max=4.5 truncated it)
+    decay_tail: true
+    decay_handoff_tcm: 0.20
+    decay_tail_atol: 1.0e-10
+    decay_stop_safety: 0.9
+    # I5 compile-stall fix + RECOMMENDED production combo (OOE_decay4 review; bit-identical N_eff):
+    # DirectAdjoint (reliable ~125 s compile, no stochastic 10-40 min stall) + legacy atol floor
+    # (decay_tail_hardened=false; fast compile, feature step-size-converged) + n_save=64 (DirectAdjoint
+    # compile scales with #SaveAt pts). ~2x warm (22.5 vs 11 s/pt) vs RecursiveCheckpoint+watchdog.
+    use_direct_adjoint: true
+    decay_tail_hardened: false
+    n_save: 64
+    g_fixed: 7.0e-12
+    provides: [BBN_Yp, BBN_DH, N_eff_BBN]
+
+params:
+  omega_b:
+    prior: {min: 0.019, max: 0.025}
+    ref: {dist: norm, loc: 0.02239, scale: 2.1e-4}
+    proposal: 1.0e-4
+    latex: \Omega_\mathrm{b} h^2
+  # m_phi restricted to the two-leg-VALIDATED clean range (2026-06-21 MCMC-path sweep at N=101:
+  # m_phi=1.0/1.05/1.10 give N_eff 3.078-3.079, 99.8-99.9% depleted, ~10 s warm; m_phi=1.20 BLOWS UP
+  # to N_eff=24.5 — the high-eps feature pile-up/under-resolution limit, see docs/M_PHI_LIMIT.md).
+  # [0.8,1.1] is the robust "~1 MeV injection" core; the edge (1.1-1.2) is deferred (handoff decision).
+  m_phi:
+    prior: {min: 0.8, max: 1.1}
+    ref: {dist: norm, loc: 1.0, scale: 0.06}
+    proposal: 0.05
+    latex: m_\phi\,[\mathrm{MeV}]
+  # amp capped at -1.5 (amp<=3e-2 => Delta N_eff<~0.2, the data-relevant range): excludes the
+  # extreme-injection corner that collapses the explicit solve at the m_phi prior edges (P3 N=257
+  # corner check). The posterior lives at low amp (BBN disfavors large injection) where all m are stable.
+  log10_amp:
+    prior: {min: -4.0, max: -2.0}
+    ref: {dist: norm, loc: -2.7, scale: 0.25}
+    proposal: 0.2
+    latex: \log_{10} A_\phi
+  N_eff_BBN:
+    latex: 'N_\mathrm{eff}^\mathrm{BBN}'
+  BBN_Yp:
+    latex: 'Y_\mathrm{P}'
+  BBN_DH:
+    latex: '(D/H)\times10^5'
+  # transport safety monitors saved per-point (scan 2026-06-22): eps_tail = rho_nu fraction in the
+  # down-weighted high-eps bins (the ε³ energy-space monitor; ~0.5% when safe), rho_x_over_rho_nu =
+  # leftover-rho_X drop validity (~4e-6 when safe). Watch these stay ≪1 across the posterior.
+  eps_tail_energy_frac:
+    latex: f_{\rho_\nu}^{\varepsilon\geq13}
+  rho_x_over_rho_nu_final:
+    latex: \rho_X/\rho_\nu
+
+sampler:
+  mcmc:
+    drag: false
+    oversample_power: 0.0
+    proposal_scale: 1.9
+    max_samples: 1200        # SHORT demo chain (N=101 + DirectAdjoint ~22.5 s/pt warm -> ~7.5h/chain; 4 chains)
+    Rminus1_stop: 0.3        # loose convergence for a short demo
+    Rminus1_cl_stop: 0.5
+    burn_in: 50

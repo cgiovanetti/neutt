@@ -1,6 +1,6 @@
 % ============================================================================
 %  BURST / neutt manual
-%  Standard-Model + Delta-N_eff sector of the JAX/GPU port of BURST.
+%  Standard-Model + Delta-N_eff sector of the JAX/GPU port of BURST, and (Part II) the dark sectors.
 %  Compile:  module load texlive/2024 && latexmk -pdf burst_manual.tex
 %       or:  pdflatex burst_manual.tex   (run twice for the ToC / refs)
 % ============================================================================
@@ -126,20 +126,22 @@
 {\Huge\bfseries BURST \,/\, \texttt{neutt}}\\[0.6cm]
 {\LARGE A Manual for the JAX/GPU Port of\\[0.2cm]
 Neutrino Boltzmann Transport in Big Bang Nucleosynthesis}\\[1.1cm]
-{\large\itshape Standard Model, $\dNeff$, and flavour mixing}\\[2.0cm]
+{\large\itshape Standard Model, $\dNeff$, flavour mixing, and the dark sectors}\\[2.0cm]
 
 \begin{minipage}{0.82\textwidth}\centering\small
 This manual documents the neutrino-transport sector of \texttt{neutt}, the
 differentiable JAX/GPU re-implementation of the Fortran code \textbf{BURST}
-(Grohs, Fuller, Kishimoto, Paris \& Vlasenko 2016).  It covers the
+(Grohs, Fuller, Kishimoto, Paris \& Vlasenko 2016).  Part one covers the
 Standard-Model weak-decoupling calculation of $\Neff$, the neutrino spectral
 distortions, finite-temperature quantum-electrodynamics (QED) corrections (through
 the next-to-leading-order (NLO) $\mathcal O(e^3)$ term, on by default), the coupling
 to the \textbf{LINX} BBN abundance
 code, and the neutrino flavour-mixing refinement (the QKE, or quantum kinetic
 equation, density-matrix
-transport), with emphasis on the reasons behind the difficult numerical design
-choices.
+transport).  Part two covers the interacting dark sectors of the \code{dark}
+branch: the dark boson decay sectors (vector $Z'$ / majoron), the thermal-majoron
+$\dNeff$, and the $\chi\leftrightarrow\nu$ contact sector.  The emphasis throughout
+is on the reasons behind the difficult numerical design choices.
 
 Throughout, the JAX implementation is mapped back to its Fortran BURST
 ancestor, and every place where the port omits a BURST feature, or takes a
@@ -213,7 +215,8 @@ wherever possible.  Speed is pursued only where it costs no accuracy.
 
 \subsection{Scope of this manual}
 
-The manual (Sections~\ref{sec:physics}--\ref{sec:extend}) covers the
+The manual is in two parts.  \textbf{Part one (Sections~\ref{sec:physics}--%
+\ref{sec:extend})} covers the
 Standard-Model neutrino transport and everything needed
 to drive it: the background plasma thermodynamics, finite-temperature QED corrections,
 the weak collision kernels, the coupled decoupling solver that produces $\Neff$
@@ -225,9 +228,16 @@ physics), together with the simplest beyond-Standard-Model handle, the
 inert dark-radiation parameter $\dNeff$ (extra relativistic energy density
 that redshifts like radiation and does not interact).
 
-The interacting dark-sector extensions (dark boson decays, the thermal majoron,
-and the $\chi\leftrightarrow\nu$ contact sector) live on the repository's
-\code{dark} branch, which carries its own manual.
+\textbf{Part two (Sections~\ref{sec:dark}--\ref{sec:darkextend})} covers the
+interacting dark sectors, which live on the repository's \code{dark} branch only:
+the dark boson decay sectors (a vector $Z'$ and a majoron, coupled to neutrinos
+through $X\leftrightarrow\nu\bar\nu$), the thermal-majoron $\dNeff$ case study, and
+the $\chi\leftrightarrow\nu$ contact sector (a dark-matter fermion scattering on
+neutrinos), the last documented up to its in-progress lepton-kernel source fix
+(Section~\ref{sec:chinu}).  These are the original research purpose of BURST, and
+the emphasis there is on the rationale behind their delicate numerical design.  With
+the dark sectors off (the default) every solver is the Standard-Model one of Part
+one, operation for operation.
 
 \textbf{Genuinely out of scope}, because the JAX port does not implement them, are
 BURST's internal nuclear reaction network and its recombination / sound-horizon
@@ -443,8 +453,13 @@ The body proceeds physics (Section~\ref{sec:physics}) $\to$ numerics
 (Section~\ref{sec:linx}) $\to$ parameters (Section~\ref{sec:knobs}), validation
 (Section~\ref{sec:validation}), and caveats (Section~\ref{sec:knownissues}); then
 the QKE flavour-mixing refinement (Section~\ref{sec:qke})
-and directions for extending the code (Section~\ref{sec:extend}); closing with the
-mapping appendix, glossary, and references.
+and directions for extending the code (Section~\ref{sec:extend}); then Part~II on the
+interacting dark sectors (Sections~\ref{sec:dark}--\ref{sec:darkextend}); closing with
+the mapping appendix, glossary, and references.
+
+% ###########################################################################
+\part{Standard-Model neutrino transport}
+% ###########################################################################
 
 % ===========================================================================
 \section{Physics background}
@@ -1028,6 +1043,7 @@ The modules layer from foundation to coupling (a reader's first map of the code)
 \code{transport/} (\code{nunu}, \code{nunubar}, \code{nuer1}, \code{nuer2}, \code{nuepma}, \code{assemble}) & the SM weak collision kernels (each lepton kernel with its reference and scheduled implementation, Section~\ref{sec:sched}) and the gated RHS assembly \\
 \code{decoupling}, \code{hybrid} & the coupled solvers: the production RHS, \code{make_decoupling_solver}, the exponential-midpoint hybrid \\
 \code{transport/qke/} & the QKE density-matrix solver, the SM flavour-mixing refinement (Section~\ref{sec:qke}) \\
+\code{dark}, \code{transport/} (\code{dv_nu}, \code{chi_nu}, \code{chi_brute}) & the dark sectors (Part~II): the sector data types and the decay and $\chi\leftrightarrow\nu$ kernels \\
 LINX adapter (separate repo) & \code{transport_adapter} / \code{coupled_bbn}: the seam that hands the spectra to LINX for abundances \\
 \bottomrule
 \end{tabular}
@@ -1342,9 +1358,11 @@ FD_ENVELOPE_C = 10.0                           # the QKE cap VALUE (env NEUTT_FD
 
 lagrange_window(abscissas, query, ord=5) -> (idx, weights)     # HOST precompute
 apply_log_interp(logf_grid, idx, weights,
-        fd_decay_base=None, bracket=None)         -> logf      # jittable gather+clamp
+        range_limit=False, fd_decay_base=None,
+        bracket=None)                             -> logf      # jittable gather+clamp
 interp_log_occ_dynamic(logf_grid, abscissas, query, ord=5,
-        fd_cap_logC=inf, fd_decay=False,
+        clamp_high=True, smooth_floor=0.0, range_limit=False,
+        fd_cap_logC=inf, off_grid_mode="default", fd_decay=False,
         monotone_read=False)                      -> logf      # jittable, traced query
 \end{lstlisting}
 For the SM kernels: the grid-only kernels use \code{lagrange_window} (host) $+$
@@ -1353,7 +1371,9 @@ For the SM kernels: the grid-only kernels use \code{lagrange_window} (host) $+$
 $-300$ floor (the fermion clamp); the off-grid closures (\code{fd_cap_logC},
 \code{fd_decay}, \code{monotone_read} in the dynamic read, and their
 \code{fd_decay_base}/\code{bracket} counterparts in the static one) default off,
-the SM-faithful setting.
+the SM-faithful setting.  So do the dark-sector options \code{range_limit},
+\code{clamp_high}, \code{smooth_floor} and \code{off_grid_mode}
+(Section~\ref{sec:darkknobs}).
 
 \begin{diffbox}
 The high-occupation clamp sends an interpolation overshoot to $\log f>0$ down to
@@ -1659,7 +1679,8 @@ cost in BURST and the part that the kernel-tensor reformulation
 \begin{lstlisting}
 assemble_rhs(grid, occ, tcmev, tplmev, phie, prec_trans,
              nunu_kernel, nunubar_kernel, nuratiotol=3.0,
-             m_e_eff=M_ELECTRON, use_sched=False, gate_width=0.0, lag_tail_fix=True)
+             m_e_eff=M_ELECTRON, use_sched=False, gate_width=0.0, range_limit=False,
+             lag_tail_fix=True)
     -> (doccfracdt[3,2,N],  drhonudt)        # [s^-1],  [MeV^4/s]
 \end{lstlisting}
 Here \code{occ} is the occupation $f[\text{flavour}=3,\text{cp}=2,\text{bin}=N]$,
@@ -1707,7 +1728,8 @@ fourth momentum leg $p_4$ of a $1+2\to3+4$ process, the off-grid leg read by int
 \begin{lstlisting}
 assemble_split_rhs(grid, occ, tcmev, tplmev, phie, prec_trans,
                    nunu_kernel, nunubar_kernel, nuratiotol=3.0,
-                   m_e_eff=M_ELECTRON, use_sched=False, fd_cap_logC=inf, lag_tail_fix=True,
+                   m_e_eff=M_ELECTRON, use_sched=False, range_limit=False, fd_cap_logC=inf,
+                   lag_tail_fix=True,
                    fd_decay=False, monotone_read=False)
     -> (A[3,2,N], B[3,2,N], drhonudt)        # df/dt = A - B*occ, both >= 0
 \end{lstlisting}
@@ -2172,7 +2194,11 @@ make_decoupling_solver(grid=None, *, n_save=64, max_steps=50_000,
 \end{lstlisting}
 The builder's \code{xi} is the build-time degeneracy (it sets the baked noise
 floor and initial spectrum), so a scan over $\xi$ uses \code{solve(xi=...)}
-instead.
+instead.  The omitted build-time arguments (\code{dark}, \code{chi_sector},
+\code{decay_tail}, \code{decay_to_sm} and their satellites) and the per-call
+\code{f_x0}, \code{f_chi0} drive the dark sectors of Part~II
+(Sections~\ref{sec:darktransport}--\ref{sec:chinu}); with them off the solve is
+the one described here.
 
 \paragraph{Build-time arguments}
 \begin{itemize}[nosep]
@@ -2243,7 +2269,7 @@ the kernels, and the noise floor, and take the same physics knobs.
 make_rhs(grid, prec_trans, nunu_kernel, nunubar_kernel, T_cm_init,
          nuratiotol=3.0, use_renorm=True, use_sched=False, renorm_pdep=True,
          qed_nlo=True, tcm_cutoff=0.015, phie=0.0, ..., delta_neff_init=0.0,
-         me=M_ELECTRON, lag_tail_fix=True)
+         me=M_ELECTRON, lag_tail_fix=True, dark=None, chi_sector=None, ...)
     -> rhs(lna, state, args) -> {"T_pl": dT_pl, "f": df}     # per d(ln a)
 
 make_split_rates(grid, prec_trans, nunu_kernel, nunubar_kernel, T_cm_init, ...)
@@ -3999,6 +4025,1141 @@ An $\Neff$-affecting change is checked against the canonical pins with the
   frozen, so a model with relevant dynamics outside that window needs the window and
   the equilibrium initial condition changed.
 \end{itemize}
+
+% ###########################################################################
+\part{The interacting dark sectors}
+% ###########################################################################
+
+% ###########################################################################
+\section{The dark sectors: overview and scope}
+\label{sec:dark}
+% ###########################################################################
+
+The research purpose of BURST is dark-sector physics in BBN, and the port now
+carries several dark extensions of the neutrino transport.  This part documents
+them, with emphasis on why the (often subtle) design choices were made.
+
+\subsection{What is covered, and what is not}
+
+\textbf{Covered here:}
+\begin{itemize}[nosep]
+\item the \textbf{dark boson decay sectors}: a massive boson $X$ that couples
+  to neutrinos through $X\leftrightarrow\nu\bar\nu$: a \textbf{vector $Z'$} and a
+  \textbf{majoron / pseudoscalar $J$}
+  (Sections~\ref{sec:darkamp}, \ref{sec:darktransport});
+\item the \textbf{decay-tail solvers} and the dark hybrid/implicit heads
+  (Section~\ref{sec:darksolvers});
+\item the \textbf{thermal-majoron $\dNeff=+2.43$ case study}
+  (Section~\ref{sec:majoron});
+\item the out-of-equilibrium (OOE) scalar decay (folded into
+  Sections~\ref{sec:darksolvers}--\ref{sec:majoron});
+\item the \textbf{$\chi\leftrightarrow\nu$ contact-interaction sector}: a
+  dark-matter fermion scattering on neutrinos, including its strong-coupling
+  exact-shape solver, documented up to the in-progress lepton-kernel source
+  fix (Section~\ref{sec:chinu}).
+\end{itemize}
+\textbf{Not covered:} the legacy \code{chi}/\code{dv} kernels these scenarios
+superseded, and an end-to-end external dark BBN oracle; the dark sectors
+are validated against brute-force collision integrals and conservation laws rather
+than a full reference code (a deliberately different validation contract from the
+SM sector).
+
+The LINX-side entry points quoted in this part (\code{make_coupled_bbn} with
+\code{dark=}, \code{chi_sector=} or \code{solver="exact"}, and the scalar-decay
+\code{mcmc/} driver built on it) belong to the dark-capable LINX coupling the
+sectors were developed with; the coupling of Section~\ref{sec:linx} does not take
+them.  Everything on the \texttt{neutt} side (the sectors, kernels and solvers) is
+in this package.
+
+\subsection{The one physical picture behind every dark design choice}
+\label{sec:darkpicture}
+
+Almost every subtlety below follows from a single fact about the coordinate
+system.  Transport evolves the spectrum in comoving energy $\eps=p/\Tcm$
+with $\Tcm=\Tcm^{\rm init}e^{-\ln a}$.  A neutrino that has decoupled
+(below $\Tcm\approx1$ MeV the SM collision rates $\propto\Tcm^5$ are negligible)
+then sits at \textbf{fixed $\eps$}: its physical momentum redshifts but its
+comoving-grid label does not move.
+
+Now let a dark boson $X$ of mass $m_X$ decay $X\to\nu\bar\nu$.  At rest it emits
+two neutrinos each at physical energy $\simeq m_X/2$, i.e.\ at comoving
+\begin{equation}
+  \eps_{\rm feature}=\frac{m_X/2}{\Tcm},
+  \label{eq:feature}
+\end{equation}
+a quasi-monochromatic line.  Because $\Tcm$ is falling, the same physical
+decay line climbs to ever-higher comoving $\eps$ as time goes on, and once
+deposited it freezes there (the decoupled neutrinos do not move it).  Two
+failure modes recur, and the dark machinery exists to defeat them:
+\begin{enumerate}[nosep]
+\item \textbf{deposition into near-empty high-$\eps$ bins.}  The SM Fermi--Dirac
+  occupation at $\eps\gtrsim14$ is $\lesssim10^{-6}$ (a few $\times10^{-6}$ at
+  $\eps\simeq13$).  A decay puts a feature
+  there; a pure-relative error tolerance sees a large relative
+  change in those bins and drives the step size to zero, the ``$\approx$28
+  keV step collapse.''
+\item \textbf{the climbing edge runs off the grid.}  Once $\eps_{\rm feature}$
+  exceeds $\eps_{\max}$ the injection piles up in the boundary bin, and because
+  $\rhonu=\int\eps^3 f\,\dd\eps$ the $\eps^3$ weight amplifies that
+  mis-resolved pile-up into a spurious $\Neff$.
+\end{enumerate}
+Both are step-control / discretization pathologies, not physics bugs; the
+kernels themselves are oracle-validated.  Keep
+Eq.~\eqref{eq:feature} and these two modes in mind; they explain the decay-tail
+leg structure (Section~\ref{sec:darksolvers}), the down-weighted error norm, the
+energy-fraction monitor, and the thermal-majoron off-grid fix
+(Section~\ref{sec:majoron}).
+
+\subsection{A different validation contract}
+\label{sec:darkvalidation}
+
+\begin{diffbox}
+The SM sector is gated bit-for-bit against the Fortran BURST snapshot.  The dark
+sectors cannot be: BURST has no QKE/dark end-to-end oracle one can trust;
+the Fortran \code{qburst} end-to-end solve is reported to diverge
+(its operator-split corotating scheme appears step-size unstable).  So the dark
+work is validated against \textbf{unit-level oracles and exact invariants}
+instead: a brute-force direct evaluation of the collision integral, the
+conservation sum rules (number, energy, and the cross-species ledger), the
+matrix exponential and analytic two-flavour oscillation for the coherent sector,
+and, importantly, the \textbf{mixing-off / dark-off bit-reduction} to the
+already-validated SM transport.  This is why the dark design leans on
+exactness-by-construction (positivity-preserving exponential steps,
+trace-preserving channels) rather than on tolerance tuning.
+\end{diffbox}
+
+% ===========================================================================
+\section{The dark amplitudes and data types}
+\label{sec:darkamp}
+% ===========================================================================
+
+\subsection{The scenarios and their matrix elements}
+
+A massive ($\sim$MeV) dark boson $X$ couples to neutrinos via
+$X\leftrightarrow\nu\bar\nu$; it is populated and depleted by (inverse) decay
+against the neutrino bath, and its energy density enters the Hubble rate.  The
+decay sectors implement two scenarios; couplings are flavour-diagonal 3-vectors
+$g_\alpha$ (default universal), neutrinos massless and left-handed.
+
+\begin{itemize}[nosep]
+\item \textbf{Vector $Z'$} (\code{spin_dof = 3}):
+  $\mathcal L\supset g_\nu Z'_\mu\,\bar\nu_\alpha\gamma^\mu P_L\nu_\alpha$.
+  Process $Z'\to\nu\bar\nu$, partial width $\Gamma=g_\nu^2 m_{Z'}/(24\pi)$ per
+  flavour.
+\item \textbf{Majoron / pseudoscalar $J$} (\code{spin_dof = 1}):
+  $\mathcal L\supset-\tfrac{i}{2}g_{\rm CGJPS} J\,\bar\nu_\alpha\gamma^5\nu_\alpha$
+  (Majorana $\nu$; the $\tfrac12$ is the Majorana factor), with $g_{\rm CGJPS}$
+  the universal coupling of the cosmological majoron of Chang--Giovanetti et al.\
+  (\href{https://arxiv.org/abs/2401.00687}{arXiv:2401.00687}).  Process
+  $J\to\nu\bar\nu$, partial width $\Gamma=g_{\rm CGJPS}^2 m_J/(16\pi)$ per flavour
+  ($\tau_J=16\pi/3 g_{\rm CGJPS}^2 m_J$); cross-checked against Heeck
+  (\href{https://arxiv.org/abs/1709.07670}{arXiv:1709.07670}).  The kernel
+  coupling is $g=g_{\rm CGJPS}/\sqrt2$ (the Majorana--Dirac pair-counting factor),
+  so $g^2=g_{\rm CGJPS}^2/2$ below.
+\end{itemize}
+
+Both reduce to a single kernel form,
+\begin{equation}
+  \overline{\sum}|M|^2 = 2\,g^2\,m_X^2 ,
+\end{equation}
+($\sum$ over all final spins, no averaging, the degeneracy division lives in
+the kernel prefactor), with $g^2=g_\nu^2$ (vector) and $g^2=g_{\rm CGJPS}^2/2$ (majoron)
+(the Majorana--Dirac pair-counting factor).  All eight tree-level $|M|^2$ for
+the three scenarios (the two decays plus the $\mathcal O(g^4)$ $2\!\to\!2$
+partners) were derived with FeynCalc and gated by 16 internal $+$ 6 literature
+checks plus an independent adversarial re-derivation; the $\mathcal O(g^4)$
+amplitudes are kept for completeness but are negligible at BBN-viable couplings.
+
+\begin{diffbox}
+The dark amplitudes are new physics, not a port of a Fortran routine;
+they were derived from scratch (the headless-FeynCalc workflow in
+\code{dark_amplitudes/}, archived on the BURST repository's \code{dark} branch).  The $\chi$ amplitudes were validated the same way
+(and shown to be the SM lepton-kernel family at $C_V=1,C_A=0,m_e\to m_\chi$,
+$G_{\rm eff}^2=g_\chi^2 g_\nu^2/2m_{Z'}^4$); the $\chi$ transport is documented in
+Section~\ref{sec:chinu}.
+\end{diffbox}
+
+\subsection{The dark data types (\texttt{dark.py})}
+
+\code{BosonDecaySector} is an \code{equinox.Module} whose coupling/mass fields
+are dynamic (so a mass/coupling scan compiles once and re-runs); only
+\code{spin_dof} is static.
+
+\begin{center}\small
+\begin{tabular}{@{}R{0.16\textwidth}R{0.74\textwidth}@{}}
+\toprule
+\textbf{field} & \textbf{meaning} \\
+\midrule
+\code{m_x} & boson mass [MeV] \\
+\code{gsq_diag} & per-flavour $g^2$, shape (3,); $\overline{\sum}|M|^2=2\,g^2 m_X^2$ \\
+\code{tratio} & $\Tcm/T_X$, the (constant) grid-unit ratio for the $X$ grid ($\eps=p/T_X$) \\
+\code{grid} & the $X$ $\eps$-grid (default \code{make_dv_grid()}: 101 bins, range 25, offset 0.0025) \\
+\code{spin_dof} & static; $X$ degrees of freedom: \textbf{3} (vector) or \textbf{1} (scalar) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Constructors \code{make_vector_decay_sector(m_zp, g_nu, ...)} (spin\_dof 3,
+\code{gsq_diag} $=g_\nu^2$) and \code{make_majoron_sector(m_j, g, ...)}
+(spin\_dof 1, \code{gsq_diag} $=g_{\rm CGJPS}^2/2$ for the input coupling $g=g_{\rm CGJPS}$).
+Supporting functions:
+\begin{lstlisting}
+boson_moments(grid, f_x, m_over_T, T_x, spin_dof) -> (n, rho, P)   # massive-boson moments
+dark_be_equil(eps, m_over_T, xi=0.0)   # Bose-Einstein, the default initial X spectrum
+dark_fd_equil(eps, m_over_T, xi=0.0)   # Fermi-Dirac (used by the chi sector)
+\end{lstlisting}
+With $e=\sqrt{\eps^2+(m/T)^2}$ and $\mathrm{pref}=\code{spin_dof}/2\pi^2$,
+$n=\mathrm{pref}\,T_x^3\!\int\eps^2 f$, $\rho=\mathrm{pref}\,T_x^4\!\int\eps^2 e f$,
+$P=\tfrac{\mathrm{pref}}{3}T_x^4\!\int\eps^4 f/e$.  \code{boson_moments} is
+statistics-agnostic (it just integrates $f$), so it provides $\rho_X$ for the
+Hubble rate in every dark RHS.  The Bose--Einstein occupation diverges as
+$(\eps,m)\to0$, which is why the $X$ grid carries a small offset.
+
+% ===========================================================================
+\section{Dark boson decay transport}
+\label{sec:darktransport}
+% ===========================================================================
+
+The decay sector adds an \code{'f_x'} component to the state and evolves the two
+coupled processes $X\to\nu\bar\nu$ (decay; depletes $X$, injects $\nu$) and
+$\nu\bar\nu\to X$ (inverse decay; depletes $\nu$, repopulates $X$).  The module
+is \code{neutt/transport/dv_nu.py}.
+
+\subsection{The 1$\leftrightarrow$2 (inverse-)decay kernels}
+
+A $1\!\leftrightarrow\!2$ kernel differs from the SM $2\!\to\!2$ kernels in
+three physically important ways: the $X$ final/initial state carries a Bose
+enhancement/absorption factor $(1+f_X)$/$f_X$, the neutrino legs carry Pauli
+blocking $(1-f_\nu)$, and the remaining collision integral is one-dimensional
+(the two-body kinematics fix the rest), over the parent-$X$ energy
+(Gauss--Laguerre) for the $\nu$-tracked kernel, or over the daughter-$\nu$
+momentum (Gauss--Legendre) for the $X$-tracked kernel.  The kernels return $(\mathrm{net},
+\mathrm{frs})$ directly in s$^{-1}$ (a $1\!\leftrightarrow\!2$ rate scales
+as $g^2 m^2/E$, not $G_{\rm F}^2 T^5$, so, unlike the SM kernels, there is no
+$\Tcm^5$ factor to apply later).
+
+\begin{lstlisting}
+# d f_X / dt  (X is the tracked species; daughter-nu momenta span a FINITE range -> Gauss-Legendre)
+x1_nu_decay_rates(nu_grid, x_grid, f_nu, f_x, meps, tratio, tcmev, gsq_diag,
+                  spin_dof=3, nleg=20, off_grid_mode="default") -> (net, frs)   # (3, Nx)
+
+# d f_nu / dt (nu tracked; parent-X energy runs a SEMI-INFINITE tail -> Gauss-Laguerre)
+nu1_x_decay_rates(nu_grid, x_grid, f_nu, f_x, meps, tratio, tcmev, gsq_diag,
+                  nlag=20, off_grid_mode="default") -> (net, frs)               # (3, 2, Nnu)
+
+# affine forms  net = A - B*f  (for the exponential-midpoint stiff head)
+x1_nu_decay_affine(nu_grid, x_grid, f_nu, meps, tratio, tcmev, gsq_diag,
+                   spin_dof=3, nleg=20, range_limit=False,
+                   off_grid_mode="default", forward_only_tcm=0.0) -> (A_x, B_x)
+nu1_x_decay_affine(nu_grid, x_grid, f_nu, f_x, meps, tratio, tcmev, gsq_diag,
+                   nlag=20, range_limit=False,
+                   off_grid_mode="default", forward_only_tcm=0.0) -> (A_nu, B_nu)
+\end{lstlisting}
+Here $\mathrm{meps}=m_X/\Tcm$, $\mathrm{tratio}=\Tcm/T_X$, $\mathrm{tcmev}=\Tcm$
+[MeV].  Both kernels are exactly linear in the local tracked occupation
+(it factors out of the inner quadrature), which is what makes the affine
+$A-Bf$ split exact and lets the exponential-midpoint head integrate the stiff
+decay loss $-B_X f_X$ analytically (Section~\ref{sec:darksolvers}).  The $X$
+(boson) spectrum is interpolated without the fermionic high-occupation
+clamp (BE occupations exceed 1 at small momentum); the neutrino legs use the
+standard fermionic log-interp.  Convenience aliases
+\code{nu1_dv_decay_rates}/\code{nu1_j_decay_rates} (the $\nu$-side is identical
+for a vector or scalar parent) and \code{dv1_nu_decay_rates}/\code{j1_nu_decay_rates}
+fix \code{spin_dof}.
+
+\subsection{Why the dark legs are ungated: the two gate traps}
+\label{sec:darkgate}
+
+This is the central correctness choice and deserves the space.  Recall
+(Section~\ref{sec:gatenum}) that the SM kernels carry a per-step
+quadrature-cancellation noise: $\mathrm{net}$ is a small difference of
+large forward/reverse integrals on a coarse grid, so near equilibrium they need
+the precision gate to suppress sign-flickering noise that would otherwise corrupt
+the adaptive error estimate.  The $1\!\leftrightarrow\!2$ decay kernels are
+fundamentally different and \textbf{must not be gated}:
+
+\begin{quote}
+The decay integrands are smooth log-interpolated products over a clean
+Gauss--Legendre/Laguerre quadrature; there is no catastrophic
+cancellation.  Their detailed-balance residual is a smooth $\sim10^{-16}\cdot
+\mathrm{frs}$ drift (negligible, $\lesssim10^{-13}$ s$^{-1}$ even at strong
+coupling).  Integrating that residual is harmless; gating it is what hurts.
+\end{quote}
+
+Two concrete traps were diagnosed (and both are why the legs are added raw,
+after the SM gate):
+\begin{itemize}[nosep]
+\item \textbf{Trap 1: folding the dark legs into the SM gate sums.}  The gate
+  keeps bin $i$ open when $|\sum\mathrm{net}_i|/\sum\mathrm{frs}_i/\mathrm{prec}_i
+  \ge\mathrm{nuratiotol}$, with $\mathrm{prec}_i$ the tiny per-bin
+  equilibrium-noise floor (Section~\ref{sec:gatenum}).  The dark net is
+  real signal far above that floor, so folding it into the numerator flips
+  $\sim$600 near-equilibrium SM bins open (the dark $\mathrm{frs}$ would only
+  enter the denominator, if anything lowering $\mathrm{test\_ratio}$); the
+  per-step flicker of those newly-open gates breaks the explicit error estimate
+  $\to$ systematic tail drift $\to$ step collapse.
+\item \textbf{Trap 2: giving the dark legs their own hard relative-floor
+  gate.}  A hard $|\mathrm{net}|/\mathrm{frs}\ge$ floor reintroduces threshold
+  flicker (bins crossing the floor between steps) and a per-executable
+  step-count ``roulette'' (the same nondeterministic-stall family as the SM
+  \code{atol} stall).
+\end{itemize}
+The resolution: discard the dark $\mathrm{frs}$, add the raw $\mathrm{net}$ legs
+to the SM RHS after \code{assemble_rhs} and after the SM gate, and add
+$\rho_X$ to $H$.  Because the residual is smooth and tiny, the ungated
+integration is accuracy-neutral (validated to $\sim10^{-6}$ in $\Neff$ against
+the no-cap reference).
+
+\begin{diffbox}
+The contrast with the $\chi$ contact kernels (Section~\ref{sec:chinu}) is instructive:
+those are the SM weak-kernel family (they cancel and carry
+$\sim10^{-5}\cdot\mathrm{frs}$ noise), so they do keep the $\Tcm^5$
+convention and do require their own gate, separate from the SM legs,
+to avoid Trap~1.  ``Conservation is not a cut oracle'': a kernel is gated only
+if it has cancellation noise, not merely because it is a collision term.
+\end{diffbox}
+
+\subsection{The three interpolation knobs and why they exist}
+\label{sec:darkknobs}
+
+The decay kernels expose three off-grid / feature-handling knobs.  At the kernel
+level all three default to a no-op, so the explicit decay path is bit-identical to
+the pinned reference; they exist to handle regimes the default interpolation
+mishandles.  The production stiff solver selects the physically-correct settings
+among them (last paragraph).
+
+\paragraph{\texttt{off\_grid\_mode}: the fx3 off-grid read}
+In \code{nu1_x_decay_*}, the Gauss--Laguerre tail over the parent-$X$ energy
+$E_X\in[a,\infty)$ (with $E_X$, $q_3$ in $T_X$ units) samples $f_X$ at
+$q_3=\sqrt{E_X^2-(m_X/T_X)^2}$, which reaches values far above the $X$ grid
+edge ($q_3$ up to $\sim$90 vs
+$\eps_X^{\max}=25$); 40--90\% of the nodes are off-grid even for the
+genuine daughter, because the integral runs over the whole $E_X$ tail.  The
+default order-5 log-space polynomial extrapolates there, and for a
+sharply-falling (quadratic-in-$q$) log-occupation it \textbf{overshoots upward}
+(large Lagrange weights amplify the curvature), reading $f_X$ up where it should
+be $\approx0$.  Since the spurious source lands at high $\eps$ and $\rhonu$
+weights by $\eps^3$, this manufactures energy, the thermal-majoron ``break''
+(Section~\ref{sec:majoron}).  The fix is the physical read for a
+non-relativistic parent (whose occupation is genuinely $e^{-q^2/2mT}$-
+suppressed off-grid): \code{off_grid_mode="floor"} returns $f\approx0$ above the
+edge.  The three modes:
+\begin{itemize}[nosep]
+\item \code{"default"}: order-5 window to $2\eps_X^{\max}$, then log-linear,
+  then floor.  Bit-faithful to BURST; benign on a smooth explicit $f_X$.
+\item \code{"linear"}: log-linear downward past the edge.  Not used for
+  the non-rel parent: it decays too slowly (under-resolves the quadratic
+  falloff) and still leaves a spurious tail.
+\item \code{"floor"}: $f\approx0$ above the edge.  The correct read for a
+  non-relativistic parent; the dominant cure for the majoron break.
+\end{itemize}
+
+\paragraph{\texttt{forward\_only\_tcm}: dropping the inverse decay at low $T$}
+Below this $\Tcm$ [MeV], the inverse decay $\nu\bar\nu\to X$ is dropped (forward
+$X\to\nu\bar\nu$ only).  Two reasons: physical, the inverse rate is
+sourced by the frozen-FD $\nu\bar\nu$ phase space and is Boltzmann-suppressed
+$\propto e^{-m_X/T}\to0$ at low $T$ (a $\nu\bar\nu$ pair rarely reaches
+$\sqrt s\ge m_X$; the $X$ abundance does not enter this source), so
+dropping it is accuracy-neutral where it matters; numerical, the
+inverse-decay integrand is precisely the source of the off-grid
+ill-conditioning past $\ln a\approx1.7$.  Mechanically the source coefficient
+$A_X\to0$ and $B_X\to$ the exact forward Pauli loss $\ge0$, so the $X$ only
+depletes (no inverse-decay runaway, no reliance on a monotonicity stabilizer).
+Default $0.0$ never fires (bit-identical); the thermal-majoron recipe uses
+$\approx0.7$.
+
+\paragraph{\texttt{range\_limit}: the window-max cap}
+\code{range_limit=True} caps an off-grid overshoot at the local interpolation
+window's maximum occupation, the shape-preserving (monotone-FD) bound.  It is
+off by default.  It exists because the decay deposits a genuine super-FD
+feature (the $\eps_{\rm feature}$ line), which the SM-path FD-envelope cap
+(\code{fd_cap_logC}; Section~\ref{sec:qkecap}) would erase, so the dark
+legs cannot use the FD cap, and \code{range_limit} is the milder,
+feature-preserving alternative when an off-grid overshoot must be bounded.  (It is
+not used on the SM/QKE path, where it is not load-bearing; it is retained as a dark
+opt-in.  The two caps are complementary, not interchangeable; see
+Section~\ref{sec:qkecap}.)
+
+\paragraph{The production-solver defaults.}
+The kernel arguments above default to the bit-faithful no-ops, and the explicit
+decoupling path uses them as-is; the production stiff dark-decay solver
+(\code{make_dark_decay_implicit_solver}, Section~\ref{sec:darkheads}) instead
+selects the physically-correct reads.  It defaults to
+\code{dark_offgrid_mode="floor"} (zero the off-grid read above $\eps_{\max}$,
+correct because the genuine decay feature peaks at
+$\eps_{\rm feature}=(m_X/2)/\Tcm<\eps_{\max}$ and the off-grid $\nu$ energy is
+FD-suppressed), keeps \code{dark_range_limit} off (the window-max cap is an
+opt-in for a relativistic-parent corner), and does not apply the \code{fx3}
+boson-read fence (redundant under \code{floor} and \code{monotone_x}; bit-identical
+on every physical state, so the affine-identity kernel gate is unchanged to
+round-off).  The SM lepton legs inside the dark run likewise default to the
+parameter-free \code{sm_tail_closure="srcfix"} (Section~\ref{sec:qkecap}) rather
+than the $C=10$ cap, which could clip the genuine super-FD injection.  On the
+canonical thermal majoron ($m_J=5$, $g=3.5\times10^{-10}$, $5\times$
+over-abundant) this gives $\dNeff=+2.43$, energy- and number-conserving, with $X$
+fully depleted; a robustness sweep confirms \code{floor} stays finite and
+energy-conserving across stronger coupling, heavier mass, and the relativistic
+vector-$Z'$ parent.
+
+% ===========================================================================
+\section{The decay-tail solvers}
+\label{sec:darksolvers}
+% ===========================================================================
+
+A decaying boson breaks the assumptions of the SM solver in the ways set out in
+Section~\ref{sec:darkpicture}.  The solvers in \code{decoupling.py} and
+\code{hybrid.py} repair this through a sequence of carefully-motivated devices.
+
+\subsection{Why the single SM solve fails, and the leg structure}
+
+The production SM solve uses $\code{atol}=10^{-30}$ (pure-relative; correct for
+the stiff $\bar\nu$ tail, Section~\ref{sec:knobs}).  Once a decay feature is
+injected, that same $\code{atol}=10^{-30}$ is exactly what triggers the ``28~keV
+step collapse'' (failure mode 1): it chases the huge relative change in the
+near-empty high-$\eps$ bins and $\dd t$ underflows.  The key realization that
+makes a clean fix possible: the SM-critical tight-tolerance transport all
+happens above $\sim$1 MeV, and the decay tail all happens below it, where the
+neutrinos are decoupled and frozen but for redshift.  So the integration is
+split in $\ln a$ with different error control per leg.
+
+\paragraph{Two legs: \texttt{two\_leg\_decay\_solve}}
+\begin{lstlisting}
+two_leg_decay_solve(term, solver, state0, lna_handoff, lna_stop, n_save,
+                    atol_hi, atol_tail, ctrl_kwargs, max_steps, throw,
+                    tail_norm=None, adjoint=None)
+\end{lstlisting}
+\begin{itemize}[nosep]
+\item \textbf{Phase 1} $[0,\code{lna_handoff}]$ keeps $\code{atol}=\code{atol_hi}
+  =10^{-30}$, the validated SM decoupling solve.  \code{lna_handoff} comes from
+  $\code{decay_handoff_tcm}=0.20$ MeV, chosen below $\nu$ decoupling
+  ($\sim$1 MeV, so SM transport is essentially done) yet above the decay
+  epoch (so the feature forms in phase 2).
+\item \textbf{Phase 2} $[\code{lna_handoff},\code{lna_stop}]$ is the decoupled
+  decay tail, with the relaxed error control below.  \code{lna_stop} is set so
+  the climbing feature edge stops before leaving the grid, at
+  $\eps_{\rm feature}=\code{decay_stop_safety}\cdot\eps_{\max}$ (default $0.9$);
+  this fences off failure mode 2.
+\end{itemize}
+This is \code{make_decoupling_solver(dark=..., decay_tail=True)}; validated for the
+$\sim$100 keV-decaying majoron with $m_X\lesssim1.1$ MeV
+($\Neff=3.07899$).
+
+\paragraph{Three legs: \texttt{decay\_to\_sm\_solve}}
+For a heavy / early-decaying boson ($m_X\gtrsim2$, so $\eps_{\rm feature}
+=m_X/2\gtrsim1$ even at $\Tcm=1$), the on-grid stop happens at $\Tcm\approx0.11$
+MeV, before $e^\pm$ annihilation finishes ($\Tcm\lesssim0.02$), so the
+two-leg $\Neff$ has not reached its $(11/4)^{4/3}$ asymptote.  But you cannot let
+one solve keep running (it chases the feature off-grid and grinds).  The fix uses
+two facts: such a boson is already depleted by the time its feature
+reaches the edge, and a frozen feature does not move.  So:
+\begin{lstlisting}
+decay_to_sm_solve(term_dark, term_sm, solver, state0,
+                  lna_decay_handoff, lna_sm_handoff, lna_max, n_save,
+                  atol_hi, atol_tail, ctrl_kwargs, max_steps, throw,
+                  tail_norm=None, adjoint=None)
+\end{lstlisting}
+phase 1 (dark, tight \code{atol}) $\to$ phase 2 (dark, down-weighted norm, edge
+held on-grid) $\to$ \textbf{phase 3 SM-only}: $f_X$ is dropped from the
+state (no more injection) and $e^\pm$ annihilation finishes with the deposited
+feature frozen in $\eps$.  The hard $f_X$ drop is energy-exact only if the
+boson is depleted at the handoff; the leftover $\rho_X$ is broadcast into the
+output (\code{rho_x_final}) so any residual is reported, not silently discarded.
+This is \code{make_decoupling_solver(dark=..., decay_to_sm=True)} (takes precedence over
+\code{decay_tail}).  Applicability: this stitching path assumes the dark
+legs (phases 1--2) are non-stiff (weak coupling / OOE) and short enough to
+compile; a stiff / overabundant boson (including the $m_J=5$ thermal majoron,
+which is also ``heavy/early'') instead needs the exponential-midpoint head
+\code{make_dark_decay_implicit_solver} of Section~\ref{sec:darkheads}.
+
+\subsection{Down-weight, don't floor: \texttt{make\_decay\_tail\_norm}}
+\label{sec:decaytailnorm}
+
+\begin{lstlisting}
+make_decay_tail_norm(grid, eps_split=13.0, feature_weight=0.05) -> norm(error_pytree)
+\end{lstlisting}
+The phase-2 controller must not chase the near-empty feature bins.  Two
+ways to achieve that, and the choice between them is the subtle part:
+
+\begin{itemize}[nosep]
+\item \textbf{An \code{atol} floor ($10^{-10}$)} works numerically but is
+  fusion-sensitive: near the floor, tiny code differences (XLA fusion
+  order, rounding) change which near-empty bins trip the controller, so
+  the step path differs between executables.  The diagnostic: the same
+  configuration with only the static \code{max_steps} constant changed
+  (50000 vs 8000) gave $\sim$270 steps (clean) vs $>$8000 (grind), and
+  \code{max_steps} cannot change the step path, so XLA must have produced a
+  numerically different executable.  This is the ``fusion roulette,'' the same
+  family as the SM \code{atol} stall.
+\item \textbf{A down-weighted error norm (the fix)} keeps $\code{atol}=10^{-30}$
+  on the populated $\eps<\code{eps_split}$ bins (full tight control, no
+  negative-$f$ excursions) but weights the $\eps\ge\code{eps_split}$ bins by
+  $\code{feature_weight}\ll1$ inside the RMS error norm.  Below $\sim$1 MeV the
+  SM neutrinos are frozen, so those high-$\eps$ bins are purely the decay
+  feature: down-weighting them in the step-size decision stops the
+  over-resolution, while the spectrum still evolves exactly via the RHS.  No
+  \code{atol} floor $\Rightarrow$ no near-floor flicker $\Rightarrow$
+  fusion-robust (identical step counts across executables).
+\end{itemize}
+$\code{eps_split}=13$ is where SM occupation is $<10^{-6}$, so nothing physical
+is down-weighted.  (Implementation note: the norm must be built on
+\code{optx.rms_norm} over a pre-weighted pytree; a hand-rolled per-leaf RMS loop
+hung the outer-\code{jit} compile of the coupled builder.)
+
+\subsection{The energy-space safety monitor}
+
+\begin{lstlisting}
+high_eps_energy_frac(grid, occ, eps_split, n_top=10) -> (tail_frac, top_frac)
+\end{lstlisting}
+The step controller measures error in occupation space, but $\Neff$
+consumes $\rhonu=\int\eps^3 f$, $\eps^3$-weighted, and the down-weighting is
+deliberately blind to exactly the high-$\eps$ bins.  So an independent,
+post-solve, energy-space diagnostic is needed to keep the compromise honest:
+\code{tail_frac} is the $\rhonu$ fraction in $\eps\ge\code{eps_split}$ (the
+down-weighted region; $\approx0.5\%$ for the validated smooth tail; an
+$\mathcal O(0.1\text{--}1)$ value flags a point where the down-weighting is
+hiding real energy), and \code{top_frac} is the fraction in the last \code{n_top}
+bins (the grid-edge pile-up indicator, $\sim5\times10^{-6}$ when healthy).  These
+are surfaced as \code{eps_tail_energy_frac}/\code{eps_top_energy_frac}; an MCMC
+rejects points with \code{eps_tail_energy_frac}$>0.05$, catching the
+$m_X\gtrsim1.2$ grid-edge blow-up ($\Neff\to24.5$) at its physical root rather
+than post-hoc on $\Neff$.
+
+\subsection{The \texttt{DirectAdjoint} compile-stall fix}
+
+A pure compile-engineering fix for a hard blocker.  The adjoint
+(Section~\ref{sec:jaxprimer}) is the strategy diffrax uses to back-propagate
+gradients through an ODE solve; it sets the gradient cost and the compile
+cost but does not affect the forward solution.  \textbf{Symptom:} the dark
+\code{diffeqsolve} compile stochastically hangs 10--40 min CPU-bound (GPU
+idle) instead of $\sim$130 s.  \textbf{Cause:} diffrax's default
+\code{RecursiveCheckpointAdjoint} builds a recursively-checkpointed
+\code{bounded_while_loop} (the machinery that lets reverse-mode differentiation
+run through an adaptive solve with bounded memory) whose XLA compile scales with
+\code{max_steps}.
+\textbf{Fix:} pass \code{adjoint=diffrax.DirectAdjoint()}, which skips that loop
+and compiles reliably ($\sim$125 s, 5/5 clean) with a bit-identical
+forward solution (DirectAdjoint changes only how a gradient would be
+taken, not the forward integration).  The cost is reverse-mode AD
+memory/speed, irrelevant for a forward solve or a gradient-free (Metropolis)
+MCMC.  \textbf{Caveat:} DirectAdjoint's compile cost scales with the number of
+\code{SaveAt} points, so use a modest \code{n_save} ($\sim$64) on the dark path.
+Exposed as \code{decay_adjoint}/\code{solve_adjoint} (default unchanged); the
+dark hybrid heads hard-wire it on their SM tail.
+
+\subsection{The stiff bulk decay and the dark heads}
+\label{sec:darkheads}
+
+For an overabundant boson the decay is \textbf{stiff}: $\Gamma\approx$
+const while $H\propto T^2$, so $\Gamma/H$ grows as $T$ drops
+($\sim$70 at $\Tcm=0.7$ MeV, $\sim$860 by $0.2$).  Then $B_X\cdot\code{dtmax}
+\gg1$ and:
+\begin{itemize}[nosep]
+\item \textbf{explicit Tsit5} is stability-limited (not accuracy-limited):
+  $\dd t$ collapses to $\sim2\times10^{-4}$ and 8000 steps reach only
+  $\ln a\approx1.72$; it grinds during the active bulk decay, at a
+  populated bin, well before any off-grid issue;
+\item \textbf{implicit Kvaerno5} is unconditionally stable but compile-hangs
+  $>$20 min; the Newton solve needs the Jacobian of the large dark RHS graph
+  (interp $+$ Gauss--Laguerre kernels), which a lower-order implicit does not
+  fix.
+\end{itemize}
+The principled cure exploits the exact per-bin affine structure of the
+decay RHS, $\dd f/\dd\ln a=A-Bf$.  Because $\mathrm{net}_X=A_X-B_X f_X$ is
+linear in $f_X$ (the partner-$\nu$ and parent-$X$ integrands are frozen
+sources), an exponential-Euler / exp-midpoint step
+\[
+  f' = f\,e^{-Bh}+\tfrac{A}{B}\big(1-e^{-Bh}\big)
+\]
+is the exact L-stable solution: a convex combination of $f$ and the
+attractor $A/B$, hence positivity-preserving and unconditionally stable, with
+no Jacobian (no implicit compile blow-up) and no stability ceiling
+(no explicit grind).  This is the same exponential-midpoint device as the SM
+hybrid head (Section~\ref{sec:hybridnum}), now carrying the dark legs.
+
+The production head is the last of three designs.  The first two were tried and
+removed (last present at BURST commit \code{430dfb3}); the table records why they fail:
+\begin{center}\small
+\begin{tabular}{@{}R{0.30\textwidth}R{0.64\textwidth}@{}}
+\toprule
+\textbf{head} & \textbf{status / why} \\
+\midrule
+plain per-bin expMid head (removed) & Physically wrong on the overabundant majoron.  A fixed-step per-bin expMid with no Pauli $f\le1$ enforcement over-deposits the sharp super-FD feature, so the two daughter occupations $f_2{+}f_3>1$ drive the $X$-loss Pauli factor $B_X=1-f_2-f_3$ negative ($B_X<0$); the $X$ exp-step then extrapolates upward and the majoron never depletes (its occupation runs away). \\
+Pauli-clipped sub-cycled head (removed) & Sub-cycled IMEX head with energy-renormalized ``delivery.''  Depletes $X$ but fails the conservation gate: it operator-splits the stiff $X\!\leftrightarrow\!\nu$ exchange (decays $X$ on the cold start-of-step $\nu$), over-depleting $X$ and losing the energy ($\rhonu$ $\sim$18\% low). \\
+\code{make_dark_decay_implicit_solver} & \textbf{The production thermal-majoron path.}  Sub-cycles $X$ and $\nu$ together with the actual decay affine $A_\nu-B_\nu f$ (\code{delivery="kernel"}), so the kernel's own detailed balance conserves energy and the real $-B_\nu f$ loss self-limits $\nu$ at $f=A_\nu/B_\nu\le1$ (the Pauli clip never fires).  It solves the same equations as the explicit Tsit5 and converges to the right answer (rel $\rhonu$ $1.8\times10^{-5}$ at $\code{n_head}=600$).  \code{monotone_x=True} clamps $f_X$ to its start value (the overabundant majoron only depletes). \\
+\bottomrule
+\end{tabular}
+\end{center}
+The key kwargs of the production head: \code{lna_sw=3.0}, \code{n_head=600},
+\code{k_sub=8} (sub-cycle count), \code{delivery="kernel"}, \code{monotone_x=True},
+plus the \code{dark_offgrid_mode} / \code{dark_forward_only_tcm} off-grid knobs of
+Section~\ref{sec:darkknobs}.  (The production head defaults
+\code{dark_range_limit=False}, matching the kernel-level \code{range_limit=False}
+of Section~\ref{sec:darkknobs}: the \code{"floor"} off-grid recipe zeroes the
+off-grid reads before any window-max cap, so the cap is unnecessary;
+\code{dark_range_limit=True} is retained only as an opt-in.)
+
+\begin{diffbox}
+The dark linear-decay case is easier than the $\chi$ (Section~\ref{sec:chinu})
+$2\!\to\!2$ annihilation: a $1\!\leftrightarrow\!2$ rate is linear in the tracked
+occupation, so \code{exp_step} is exact and no Newton / annihilation-noise
+machinery is needed.  \code{make_dark_decay_implicit_solver} reuses the
+sub-cycled-implicit pattern of the $\chi$ solver but not its complexity.
+\end{diffbox}
+
+% ===========================================================================
+\section{Case study: the thermal majoron $\dNeff=+2.43$}
+\label{sec:majoron}
+% ===========================================================================
+
+The majoron sector spans two physically distinct regimes, handled by
+different solvers, and they are the same \code{make_majoron_sector},
+differing only in mass and initial abundance:
+\begin{itemize}[nosep]
+\item a \textbf{light, out-of-equilibrium (OOE) scalar} ($m_\phi\lesssim1$ MeV,
+  decaying near $\sim$100 keV), solved by the explicit two-leg decay-tail driver
+  \code{make_decoupling_solver(dark=..., decay_tail=True)} (Section~\ref{sec:darksolvers}),
+  giving $\Neff=3.079$;
+\item the \textbf{thermal / overabundant majoron} treated in this case study
+  ($m_J=5$ MeV, $5\times$ equilibrium), solved by the implicit exponential-affine
+  head, giving $\dNeff=+2.43$.
+\end{itemize}
+So when the manual says ``the OOE scalar'' it means the light regime of this same
+majoron sector, not a separate model.  The thermal majoron is the headline dark result
+and the best worked example of how the design choices above combine.  Model:
+\code{make_majoron_sector} with $m_J=5$ MeV, $g=3.5\times10^{-10}$, initial
+abundance $5\times$ Bose--Einstein equilibrium ($\rho_X/\rho_{1\nu}\approx9$ at
+the 4 MeV start, with $\rho_{1\nu}$ the energy density of a single neutrino
+species, the per-species normalizer for $\dNeff$).  Run the full annihilation
+window so the $(11/4)^{4/3}$ $\Neff$
+applies.  The result emerged from a sequence of diagnosed wrong answers.
+
+\subsection{Step 1: the early $\Neff\approx40$ was an $\eps^3$ artifact}
+
+A naive solve gave $\Neff(\rm dark)=39.7$, $\dNeff=+36.6$, and a hard
+energy budget proves that is unphysical.  Each majoron deposits at most its rest
+mass $m_J=5$ MeV (it is deeply non-relativistic at the bulk-decay epoch,
+$m/T\approx12$).  In
+comoving variables ($\rho a^4$ constant for radiation),
+\begin{equation}
+  \dNeff = \frac{m_J\,n_X(a{=}1)\,\langle a\rangle_{\rm decay}}
+                {\rho_{1\nu}a^4},
+  \qquad \langle a\rangle_{\rm decay}\le a_{\rm handoff}.
+\end{equation}
+Using the code's own reported $X$ number moment, the maximally
+redshift-favourable ceiling is $(\dNeff)_{\max}=17.4$ (everything survives to the
+handoff then decays).  The code's $+36.6$ is $2.1\times$ over the hard ceiling
+$\Rightarrow$ energy is being created $\Rightarrow$ unphysical.  (The internal
+ledger missed it because the old ``$E_{\rm delivered}=E_X^{\rm lost}$'' check was
+a tautology ($E_{\rm delivered}$ is defined from the $X$ loss),
+so it tracked delivery, never total energy conservation.)
+
+\subsection{Step 2: the real mechanism (the off-grid parent-$X$ read)}
+
+The energy creation is the off-grid overshoot of Section~\ref{sec:darkknobs}: the
+$\nu$-injection's parent-$X$ Gauss--Laguerre integral samples $f_X$ at nodes up to
+$\sim$76--92 while the $X$ grid maxes at $\eps_X=25$, so 40--90\% of the nodes are
+off-grid even for the genuine $\eps\approx4$ daughter, and the default
+order-5 extrapolation overshoots upward into an $\eps^3$-amplified high-$\eps$
+$\nu$ tail that creates energy and number past $\ln a\approx1.7$.  The overshoot is
+pure artifact: the $X$ is non-relativistic ($m/T\approx8$ at the off-grid
+passage, $\Tcm\sim0.7$ MeV), so its true occupation
+off-grid is $e^{-q^2/2mT}\approx0$, and a $\nu$ daughter at $\eps\gg(m_J/2)/\Tcm$ is
+kinematically forbidden.  (The inverse decay alone is not the culprit; the
+dominant bug is this parent-$X$ read, present even in the forward injection.)
+
+\subsection{Step 3: the fix and the validated result}
+
+The cure has two parts, and the production solver already defaults to the first:
+\begin{enumerate}[nosep]
+\item \code{dark_offgrid_mode="floor"} (the solver default; it threads to the
+  interp-level \code{off_grid_mode} of Section~\ref{sec:darkknobs}), reading
+  $f_X=0$ above $\eps_X^{\max}$, the physically correct read for the
+  non-relativistic parent.  This is the
+  dominant cure: once the overshoot is gone, ``linear'' and ``floor'' give
+  identical conservation (the edge value is already tiny).
+\item \code{dark_forward_only_tcm=0.7}, the one non-default opt-in: below
+  $\Tcm=0.7$ MeV drop the inverse decay, letting the kernel run clean to full $X$
+  depletion (a secondary refinement; the un-gated floor also conserves, but
+  forward$+$floor depletes $X$ to $\sim10^{-52}$ rather than $\sim10^{-6}$).
+\end{enumerate}
+The production recipe is
+\code{make_dark_decay_implicit_solver(dark_offgrid_mode="floor",
+dark_forward_only_tcm=0.7)}.  The result, certified by the true
+cross-species sum-rule ledger ($E_\nu^{\rm decay}$ vs $E_X^{\rm lost}$,
+$N_\nu^{\rm decay}$ vs $2N_X^{\rm lost}$, used as gates, not
+enforcement):
+\[
+  \boxed{\ \dNeff=+2.43\ }
+\]
+with energy residual $4.8\times10^{-3}$, number residual $1.7\times10^{-3}$, and
+$X$ fully depleted ($n_X/n_X^0\le10^{-13}$ conservation gate; $\sim10^{-52}$
+actually achieved).
+Supporting validations: the matched $\dNeff$ is flat across the handoff
+$\code{lna_sw}\in\{2.0,2.5,3.0\}$ (the $+0.017$ absolute drift is a head SM bias
+that cancels against the $g{=}0$ pin); it is threshold-stable across
+$\code{dark_forward_only_tcm}\in\{0.6,0.7,0.8\}$ ($+2.438/+2.433/+2.422$).
+
+\paragraph{Why $+2.43$, and what ``residual'' means}
+The total $\dNeff=+2.43$ splits into a bulk-decay part (the $X$ that
+decays before the hand-off, a firm $\approx+2.34$), and a residual part
+(the leftover $X$ that decays after the hand-off).  The bulk $+2.34$ is a
+lower bound, and the residual is easy to over-estimate by guessing (a naive
+$+0.3$--$0.45$ would inflate the total to $\sim2.6$--$2.7$); capturing it properly
+makes its contribution only $+0.09$, so the total is $2.34+0.09=2.43$.  (The two
+numbers are not in tension: $+2.43$ is the answer, $+0.09$ is just the
+residual-$X$ piece of it.)  The residual is small because most of the
+matter-boosted leftover-$X$ energy leaks to the still-coupled plasma
+during its late decay at $T\sim0.5$ MeV (the end ratio $\Tpl/\Tcm=1.43$ confirms
+the plasma is heated), not to neutrinos, which is also why the
+thermal-majoron $\dNeff$ sits well below the naive ``all rest-mass
+$\to\nu$'' budget.
+
+\paragraph{Known safe-threshold floor: \texttt{dark\_forward\_only\_tcm}$\gtrsim0.6$.}
+At $\le0.5$ the head still conserves perfectly, but the downstream SM Tsit5
+tail NaNs, the lepton-kernel boundary fragility
+(Section~\ref{sec:knownissues}): a later gate lets the full kernel seed a slightly
+larger super-thermal high-$\eps$
+$\nu$ tail, and the thermal-majoron tail's \code{make_rhs} runs uncapped
+(the FD cap would clip the genuine super-FD feature), so the SM \code{nuer2}/
+$\nu\nu$ kernels amplify the seed.  This is not a regression and not FD-cap-fixable
+here; $0.7$ sits comfortably inside the safe band.
+
+\paragraph{Demo: reproducing the $+2.43$}
+Build the sector and the production head once, then solve (on a GPU node, with
+the \code{neutt} repository root on \code{PYTHONPATH}):
+\begin{lstlisting}
+import neutt                                 # FIRST: enables x64
+from neutt import dark
+from neutt.hybrid import make_dark_decay_implicit_solver
+
+sec  = dark.make_majoron_sector(m_j=5.0, g=3.5e-10)            # scalar majoron, spin_dof 1
+f_x0 = 5.0 * dark.dark_be_equil(sec.grid.abscissas, 5.0/4.0)   # 5x equil.; 5.0/4.0 = m_J/T_init (the m/T arg)
+solve, grid = make_dark_decay_implicit_solver(                 # build ONCE, reuse the closure
+        sec, lna_sw=2.5, n_head=600, k_sub=8,                  # plateau is flat over lna_sw 2.0-3.0
+        dark_offgrid_mode="floor", dark_forward_only_tcm=0.7)  # the off-grid fix
+out = solve(T_init=4.0, f_x0=f_x0)
+print(float(out["neff_final"]))                 # -> dark N_eff (Delta N_eff = +2.43 vs the g=0 pin)
+\end{lstlisting}
+The same builder with \code{g=0.0} (or \code{f_x0=0}) is the $\dNeff=0$ pin that
+the matched $+2.43$ is measured against; \code{out} also carries the cross-species
+ledger and the \code{eps_tail_energy_frac} monitor of
+Section~\ref{sec:darksolvers}.  A light, $\sim$100 keV-decaying scalar
+($m_X\lesssim1.1$, $\Neff=3.079$) instead uses the explicit decay-tail driver
+\code{make_decoupling_solver(dark=sec, decay_tail=True)} of
+Section~\ref{sec:darksolvers}.
+
+% ===========================================================================
+\section{The $\chi\leftrightarrow\nu$ contact-interaction sector}
+\label{sec:chinu}
+% ===========================================================================
+
+This sector adds a dark-matter fermion $\chi$ that interacts with neutrinos
+through a heavy mediator.  Everything below is validated and usable up to
+one unfinished piece: a principled replacement for the off-grid interpolation
+closures in the strong-coupling solve, which the last subsection
+(Section~\ref{sec:chinufix}) sets out as the open frontier.
+
+\subsection{Physics and the data type}
+\label{sec:chinuphys}
+
+This sector adds a \textbf{Dirac dark-matter fermion} $\chi$ coupled to neutrinos
+through a heavy $Z'$ mediator.  Because $m_{Z'}$ ($\approx91$ GeV by default, the
+mass of the Standard-Model $Z$) is far above the BBN energy scale, the mediator
+is integrated out and the interaction is a $2\!\to\!2$ contact (four-fermion)
+process: $\chi$ annihilation $\chi\bar\chi\leftrightarrow\nu\bar\nu$ and elastic
+scattering $\nu\chi\to\nu\chi$.
+
+The tree-level squared matrix elements were derived and FeynCalc-validated, and
+they turn out to be exactly the SM lepton-kernel family (the same
+$\nu$--$e$ collision structure used for weak decoupling), with vector/axial
+couplings $C_V=1$, $C_A=0$ and the electron mass replaced by the $\chi$ mass,
+\begin{equation}
+  \me\;\longrightarrow\;m_\chi,
+  \qquad
+  G_{\rm eff}^2 \;=\; \frac{g_\chi^2\,g_\nu^2}{2\,m_{Z'}^4},
+\end{equation}
+where $g_\chi$, $g_\nu$ are the mediator's couplings to $\chi$ and to neutrinos.
+This is why the kernels were easy to derive (they reuse the
+\code{nuer}/\code{nuepma} machinery and keep the SM $\Tcm^5$ rate convention) but,
+as the rest of the section shows, hard to solve.
+
+\paragraph{The \texttt{ChiSector} data type.}
+\code{dark.ChiSector} is an \code{equinox.Module} mirroring
+\code{BosonDecaySector} (Section~\ref{sec:darkamp}); its coupling and mass fields
+are dynamic leaves (so an $(m_\chi,K)$ scan compiles once), and only
+\code{spin_dof} is static.  Build one with \code{make_chi_sector}:
+\begin{lstlisting}
+sec = dark.make_chi_sector(m_chi=1.0,        # chi mass [MeV]
+                           m_zp=91187.6,     # heavy Z' mediator [MeV] ~ the SM Z
+                           g_chi=1.0, g_nu=1.0)   # mediator couplings
+# stores the per-flavour contact strength  Kflav = g_chi^2 * g_nu^2 / m_zp^4
+\end{lstlisting}
+\begin{center}\small
+\begin{tabular}{@{}R{0.16\textwidth}R{0.74\textwidth}@{}}
+\toprule
+\textbf{field} & \textbf{meaning} \\
+\midrule
+\code{m_chi}   & $\chi$ mass [MeV] \\
+\code{Kflav}   & per-flavour contact coupling $K=g_\chi^2 g_\nu^2/m_{Z'}^4$ [MeV$^{-4}$], shape (3,); the rate scales as $K\,\Tcm^5$.  It is the stored contact strength, related to the $G_{\rm eff}$ above by $K=2\,G_{\rm eff}^2$ \\
+\code{tratio}  & $\Tcm/T_\chi$, the (constant) grid-unit ratio for the $\chi$ grid ($\eps=p/T_\chi$) \\
+\code{grid}    & the $\chi$ $\eps$-grid (default \code{make_chi_grid()}) \\
+\code{spin_dof} & static; $\chi$ dof $=\mathbf{4}$ (Dirac: particle$+$antiparticle $\times$ 2 spins, one CP-symmetric $f_\chi$) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{The kernels: amplitudes, energy cuts, and why we brute-force}
+\label{sec:chinukernels}
+
+\paragraph{Amplitudes.}  The tree-level squared matrix elements for $\chi\bar\chi
+\leftrightarrow\nu\bar\nu$ and $\nu\chi\to\nu\chi$ were derived with FeynCalc and
+cross-checked in Mathematica.  As noted above they are exactly the
+Standard-Model $\nu$--lepton kernel family at $C_V=1$, $C_A=0$, $\me\to m_\chi$, so
+the coupling coefficients are the only thing that changes; everything downstream
+reuses the validated SM \code{nuer}/\code{nuepma} machinery and the $\Tcm^5$ rate
+convention.
+
+\paragraph{The energy cuts, and why they exist.}  A $2\!\to\!2$ collision rate is a
+multi-dimensional phase-space integral.  The classical way to evaluate it (the
+way the Fortran reference does, and the way the high-accuracy reference kernel
+\code{chi_nu} does) is to perform the angular integrals analytically,
+which collapses the problem to a cheap one-dimensional energy quadrature.  The price
+is that the integration limits change discontinuously as the bin energy
+crosses the kinematic thresholds, so the integrand becomes piecewise: a case
+structure of $\sim$40 ``cut'' segments, with boundary energies that have to be
+worked out by hand (the $E_1$ vs.\ $m_\chi\sqrt5/2$ case split, and the
+cut/transition/limit energies between regimes).  Getting this cut structure right
+was a large part of the work.  On a CPU it is essential: a 1-D quadrature per
+bin is cheap, whereas evaluating the full multi-dimensional integral directly, at
+every bin and every time step, would be prohibitive (the Standard-Model transport
+already costs $600$--$1000$ CPU-hours).  The neutrino-side $\chi$ kernels reuse the
+SM lepton-kernel cuts verbatim (the kinematics are identical, with
+$\code{meps}=m_\chi/\Tcm$); the $\chi$-side, where the massive particle is
+the tracked one, needed its own new cut structure.
+
+\paragraph{Why the coupled solve brute-forces instead.}  Those $\sim$40 unrolled
+cut-segments make the combined right-hand-side computation graph very large,
+and \code{diffrax}'s adaptive solver must compile that graph, which blew the
+compile up to tens of minutes.  The production coupled solver therefore takes the
+opposite approach and \textbf{brute-forces} the collision integral: it evaluates the
+full four-dimensional phase-space integral directly, as a single Gauss--Legendre
+quadrature over the partner momentum, two angles, and a final-state energy, with the
+kinematic support imposed by masking quadrature nodes that fall outside the
+allowed region rather than by analytic integration limits (\code{chi_brute}).  This
+sidesteps the cut bookkeeping entirely.  The computation graph is now tiny (one
+large reduction, no segments), so it compiles in the normal range; the cost moves to
+more quadrature points, which the GPU (built for exactly this kind of dense,
+regular arithmetic) absorbs.  The brute-force kernel is validated bin-by-bin
+against the analytic cut kernel, so accuracy is not traded for the convenience.
+
+\begin{diffbox}
+A residual subtlety: a hard $0/1$ support mask makes the integral kink as
+the temperature sweeps through $m_\chi$ (the kinematic boundary crosses fixed
+quadrature nodes), which can collapse the adaptive step.  The cure is to rescale the
+final-state-energy nodes to the exact physical centre-of-mass window each step
+(\code{exact_e3}), so no node is ever out of support, smooth, no kink, and no
+spurious flux from tapered nodes.
+\end{diffbox}
+
+\subsection{Weak coupling: the straightforward case}
+\label{sec:chinuweak}
+
+For realistic parameters (a light $\chi$, $m_\chi\lesssim1$ MeV, and a
+small $G_{\rm eff}$ so the $\chi\leftrightarrow\nu$ rate $\Gamma\lesssim H$) the
+sector is well-behaved: $\chi$ stays near equilibrium and the spectral distortion
+it sources is gentle.  Pass the sector straight into the coupled BBN driver, which
+co-evolves $f_\chi$ with the $\nu$ spectrum and $\Tpl$:
+\begin{lstlisting}
+run, info = make_coupled_bbn(transport="full",
+                             chi_sector=dark.make_chi_sector(m_chi=1.0))
+\end{lstlisting}
+\code{chi_sector} requires \code{transport="full"} (the semi-coupled and QKE paths
+have no $\chi$ block).  The integrator is selected with \code{solver=}: the default
+\code{"tsit5"} (explicit) is fine in this regime, and \code{"implicit"} routes to
+the IMEX solver below for added robustness.  Nothing on the abundance side changes;
+$\chi$ enters only through $\rho_\chi$ in the Hubble rate and through the distortion
+it leaves in $f_\nu$.
+
+\subsection{Strong coupling and the exact-shape solver}
+\label{sec:chinustrong}
+
+The hard case is strong/stiff coupling, large $G_{\rm eff}$ (e.g.\ a
+weak-scale mediator giving $K\sim100\,\GF^2$) so that $\Gamma\gg H$ by hundreds.
+The difficulty is physical, not cosmetic: when $\chi$ annihilates to $\nu\bar\nu$
+it deposits a genuine super-thermal feature in the neutrino spectrum (a
+line / double-peak near comoving $\eps\sim m_\chi/\Tcm$) that no near-equilibrium
+treatment captures.  Getting $\Neff$ and the abundances right requires
+delivering the true, signed annihilation spectrum shape.  A thermal or a
+two-moment (number$+$energy only) surrogate is a corner-cut on the spectral
+shape, and the shape matters at the BBN floor (Section~\ref{sec:chinustatus}).
+The solver therefore carries the true signed shape directly; no approximate
+(thermal, two-moment, or energy-only) delivery is offered.
+
+The strong-coupling deliverable is \code{hybrid.make_chi_exact_solver}, a
+fixed-step ($\ln a$) IMEX that evolves $(f_\nu,f_\chi)$ under the true coupled
+kernel net (one \code{chi_brute.s2_brute_rates} call returns both
+$\mathrm{net}_\nu$ and $\mathrm{net}_\chi$), so $\nu$ and $\chi$ number and energy
+are conserved to the kernel-quadrature floor.  To drive it through LINX for
+abundances, pass the $\chi$ sector to \code{make_coupled_bbn(chi_sector=...,
+transport="full", solver="exact")} (Section~\ref{sec:linx}).
+
+\paragraph{Sub-cycling (\texttt{k\_sub}, default 8): why.}
+The super-thermal bump must thermalize (through $\nu$--$\nu$ scattering)
+and leak its energy into the $e^\pm$ plasma (through $\nu$--$e$ scattering)
+on its own physical timescale.  So within each outer $\chi$ step the SM
+$\nu+\Tpl$ collision evolution is sub-cycled \code{k_sub} times, recomputing the
+SM rates at the actual bumped state each sub-step.  Without this, the
+isolated background $\Tpl$ step cannot follow the feedback and $\Neff$ diverges.
+This blow-up is \textbf{genuine numerical stiffness}, not a bookkeeping or
+energy-conservation error, and not grid under-resolution: refining the
+$\eps$-grid does not cure it.
+
+\medskip
+Three ingredients make the deep tail ($x\equiv m_\chi/\Tcm\gtrsim1.6$) stable, and
+each is necessary: with any one removed the strong solve either saturates the
+relic or blows $\Neff$ up.  They are the detailed-balance evaluation, the
+rank-revealing linear solve, and the conservation-gated freeze, in turn.
+
+\paragraph{Detailed-balance evaluation at $\Gamma\gg H$ (the \texttt{expm1} form).}
+Deep in the strong-coupling tail the forward and reverse rates of every bin agree to
+machine precision (that is detailed balance at $\Gamma\gg H$), so the naive
+net $=\mathrm{forward}-\mathrm{reverse}$ loses its sign to round-off: the relic
+abundance then collapses or saturates path-sensitively, and the noise seeds a spurious
+super-thermal high-$\eps$ tail that the $\eps^3$ energy weight amplifies into a fake
+$\Neff$.  The
+kernel (\code{chi_brute._Ffac}) therefore evaluates the net in the
+cancellation-free detailed-balance form
+\[
+  \mathrm{net}=-\,\mathrm{forward}\cdot\mathrm{expm1}\!\big(\log(\mathrm{reverse}/\mathrm{forward})\big),
+\]
+with the log-ratio summed from the individual Pauli-blocking log factors, algebraically
+identical to the subtraction but accurate to machine precision exactly where it nearly
+vanishes (the $\chi$-sector analogue of the SM kernels' \code{prec} normalisation of the
+same forward$-$reverse cancellation).  It is gated to $|\delta|<1$ (the direct difference
+is used where one leg dominates or is zero, for overflow safety) and is smooth, hence
+\code{jacfwd}-safe inside the coupled Newton.  It alone takes the spurious $\Neff$ from
+$\sim$58 down to $\sim$10; the next two ingredients remove the rest.
+
+\paragraph{The default linear solve: a rank-revealing Newton (\texttt{robust=True}).}
+On a super-thermal $f_\nu$ state the coupled log-occupation Jacobian is
+near-rank-deficient: a positive-feedback growing mode (the same lepton-kernel
+boundary amplification, Section~\ref{sec:chinufix}) sits at the backward-Euler
+stability boundary, so an ordinary \code{solve} returns a meaningless result there and the step
+is rejected.  The default \code{robust=True} replaces \code{solve} with a
+truncated-SVD least-squares step (\code{lstsq}, \code{rcond=1e-6}) that truncates
+that spurious mode at the linear-solve level and takes the minimum-norm step in the
+well-conditioned subspace.  \code{rcond} is a numerical conditioning floor (insensitive
+over $[10^{-8},10^{-5}]$), not a physics knob.  This is the principled,
+no-amplitude-bound solver, and it reproduces $\Neff\approx3.99$, relic~$\approx0.60$
+for the pinned corner $m_\chi=1$ MeV, $K=100\,\GF^2$ with no clip at all.
+
+\paragraph{The opt-in evolved-spectrum cap (\texttt{cap\_evolved}).}
+A too-loose value of the cap constant gives a cap-dependent, non-reproducible
+$\Neff$: it swings $\sim0.5$ with the constant, GPU reduction non-determinism
+flipping the near-cancellation (a spurious $\Neff=3.535$ is one such reading).
+Fixing the cap on the evolved spectrum at $f\le e^{0.5}f^{\rm eq}_\nu
+\approx1.65\,f^{\rm eq}_\nu$ (just above the physical injection peak) via
+\code{cap_evolved=True}, \code{fdcap_logC=0.5} removes that: it is cap-insensitive
+($\dNeff$ flat to $0.005$) and bit-reproducible, $\Neff\approx3.99$, with a
+monotone coupling scan (9/9).  It is an opt-in alternative; the default
+\code{robust} Newton resolves the same near-cancellation instability at the
+linear-solve level with no amplitude bound.
+
+\paragraph{Cost and the \texttt{solve\_first} fast path.}
+\code{lstsq} (SVD) is $\sim33\times$ slower than \code{solve} (LU) at the
+$707$-dimensional Jacobian on GPU (the SVD parallelises poorly), so robust runs
+$\sim2$--$3\times$ the opt-in cap path.  \code{solve_first=True} (opt-in) recovers most
+of that: it tries the cheap \code{solve} first and falls back to the SVD \code{lstsq}
+only on the rare near-singular steps.  The price is a measured $\sim1\%$
+accuracy loss (in the partial-progress gray zone it keeps a sub-optimal solve step
+instead of the exact lstsq one).  A deliberate speed/accuracy trade; default off
+keeps the exact path.
+
+\paragraph{The regime split and the conservation-gated freeze backstop
+(\texttt{deepfix="freeze"}).}
+The solver partitions on $x\equiv m_\chi/\Tcm$: it runs the coupled cross-block
+Newton only inside the active window $x\in[$\code{x_switch}$,$\code{x_freeze}$]$
+(defaults $0.5,4.0$), pins $\chi$ to its equilibrium spectrum below the window,
+and holds it above.  For very heavy $\chi$ or very strong $K$ the deep freeze tail
+($x>$\code{x_freeze}) is where the near-cancellation bites hardest; the backstop
+is the conservation gate \code{deepfix="freeze"}: after the Newton, a step
+that violates $\nu\leftrightarrow\chi$ number or energy beyond \code{cons_tol},
+or fails to converge / goes non-finite, is rejected (hold $f_\nu,f_\chi$ $\Rightarrow$
+zero deposit $\Rightarrow$ trivially conserved).  Energy gating is essential:
+a number-only gate lets energy-creating steps through and $\Neff$ diverges.
+\code{deepfix="none"} disables it and is unstable past $x\sim1.6$.
+
+\subsection{Status: the open relic-depletion shape systematic}
+\label{sec:chinustatus}
+
+The sector is documented but not yet closed.  The delivery shape is a real
+systematic: a moment-matched (number$+$energy) surrogate that is energy-exact but
+$\nu$-number short shifts the abundances by roughly $1.2$--$2.3\%$ on $\DoverH$ and
+$0.3$--$2.5\%$ on $\Yp$ (growing with $m_\chi$ and coupling), right at the BBN
+observational floor ($\Yp\pm0.003\approx1.2\%$, Aver et al.\ 2021;
+$\DoverH\pm0.030\times10^{-5}\approx1.2\%$, Cooke et al.\ 2018).  This is why
+\code{make_chi_exact_solver} carries the true signed shape rather than a surrogate.
+
+The lesson is worth stating plainly, because it is easy to get wrong:
+\textbf{``energy-exact $\Rightarrow\Neff$-exact'' is false.}  At fixed
+delivered number and energy, two different delivery spectra can still differ
+in $\Neff$ by $0.10$--$0.30$: at $m_\chi=1$, $K=100$ two moment-matched surrogates
+give $\Neff\approx3.686$ and $\approx3.804$, both short of the exact solver's
+$\approx3.99$, because the final $\Neff$ depends on where in $\eps$ the
+deposited energy lands.  This is exactly why only the true signed shape is
+acceptable, and why \code{make_chi_exact_solver} (which closes the number mismatch
+by evolving the full coupled net) is the right answer rather than a moment-matched
+surrogate.  It is the production solver, and the default \code{robust}
+(rank-revealing) Newton resolves the cap dependence at the linear-solve level.  What remains ``in progress'' is
+the deeper lepton-kernel source fix below, which would remove the remaining
+FD-envelope/window caps and the heavy-$\chi$ ($m_\chi=3$) corner uncertainty at the
+source.
+
+\subsection{The in-progress lepton-kernel source fix}
+\label{sec:chinufix}
+
+The strong-$\chi$ path has three cap devices: the FD-envelope cap
+(\code{fd_cap_logC}, Section~\ref{sec:qkecap}), the window-max
+\code{range_limit} (Section~\ref{sec:darkknobs}), and the opt-in
+\code{cap_evolved} above.  All three are stopgaps for the same underlying
+problem.  (The default \code{robust} Newton sidesteps \code{cap_evolved} by
+truncating the spurious mode at the linear solve rather than clipping the spectrum,
+but the underlying off-grid overshoot is still there for the other two and is what a
+true source fix would remove.)  When the lepton and
+$\nu$--$\nu$ kernels (\code{nuer2}, $\nu\nu$/$\bar\nu\nu$, and the $\nu\chi\to\nu\chi$
+scatter leg) need an occupation just past the top of the energy grid, the
+off-grid order-5 log-occupation extrapolation in \code{interp.py} can
+overshoot upward into an unphysical super-thermal spike (the large Lagrange
+weights amplify the curvature), which those kernels then amplify, the documented
+lepton-kernel boundary fragility (Section~\ref{sec:knownissues}), H-theorem-violating
+on non-smooth spectra.
+
+The principled cure is to replace that off-grid extrapolation
+with a physical relativistic-Fermi--Dirac decay closure: above the
+top grid node, force $\log f$ to fall off linearly in $\eps$ at (no shallower
+than) the local slope, a monotone, H-theorem-respecting tail that cannot
+overshoot upward.  Because the SM decoupling spectrum is already sub-thermal
+off-grid, this leaves the SM results bit-identical, while removing the need
+for the remaining caps and the residual $m_\chi=3$ strong-coupling limitation in one
+stroke.  It is already exposed opt-in (\code{fd_decay}/\code{monotone_read}, default
+off and SM-bit-identical); making it the default, validated across the $\chi$ grid,
+is the active development frontier for the sector.
+
+\begin{diffbox}
+\textbf{Validation contract.}  There is no trustworthy Fortran end-to-end oracle
+for the $\chi$ sector, so it is gated by a brute-force collision-integral oracle
+(\code{chi_brute.s2_brute_rates}; \code{tests/test_chi_s2_kernels.py}) plus exact
+conservation invariants (detailed balance at a common temperature, and the
+cross-species $\nu\leftrightarrow\chi$ number and energy ledgers) plus the $K\to0$
+reduction to the validated SM transport.
+\end{diffbox}
+
+% ===========================================================================
+\section{Validation of the dark sectors}
+\label{sec:darkval}
+% ===========================================================================
+
+The dark sectors follow the contract of Section~\ref{sec:darkvalidation}: no
+trustworthy Fortran end-to-end oracle, so unit oracles $+$ exact invariants $+$
+the classical reduction.  The concrete gates:
+\begin{itemize}[nosep]
+\item \textbf{Decay kernels:} a brute-force direct evaluation of the
+  $1\!\leftrightarrow\!2$ collision integral; the dilute-limit reduction to the
+  analytic widths $\Gamma_{\rm vec}=g^2 m/24\pi$, $\Gamma_{\rm sc}=g^2 m/8\pi$;
+  the cross-species number/energy ledger.  Pytest: \code{tests/test_dv_decay.py},
+  \code{tests/test_dark_decay_coupled.py}, and the data types in
+  \code{tests/test_dark_foundations.py}.
+\item \textbf{$\chi\leftrightarrow\nu$ contact kernels:} a brute-force oracle
+  (\code{chi_brute.s2_brute_rates}), detailed balance at a common temperature, the
+  cross-species $\nu\leftrightarrow\chi$ number/energy ledgers, and the $K\to0$
+  reduction to the validated SM transport (Section~\ref{sec:chinu}).  Pytest:
+  \code{tests/test_chi_s2_kernels.py}, the gated coupled RHS in
+  \code{tests/test_chi_s2_coupled.py}, and the strong-coupling solver in
+  \code{tests/test_chi_s2_exact.py} (all three of its tests are \code{slow}).
+\item \textbf{Conservation:} the solvers' own ledgers (\code{num_rel_max}/
+  \code{rho_rel_max} of \code{make_chi_exact_solver},
+  \code{decay_residual_frac}/\code{number_residual_frac} of
+  \code{make_dark_decay_implicit_solver}) and (decay) the
+  \code{eps_tail_energy_frac}/\code{eps_top_energy_frac} energy-space monitors.
+\item \textbf{SM reduction:} with the sectors off every solver is the SM one; a
+  zero-coupling decay sector leaves the RHS bitwise unchanged
+  (\code{tests/test_dark_decay_coupled.py}).
+\end{itemize}
+The flavour-mixing QKE sector is validated separately (it is a Standard-Model
+refinement, Section~\ref{sec:qke}): \code{gfortran} unit oracles for the
+weak potential ($m^2_{\rm weak}$, rel $10^{-16}$) and the coherent commutator (rel
+$10^{-15}$), the matrix exponential against fine RK4 and analytic two-flavour
+oscillation, and the mixing-off capstone that reduces the whole machinery
+bit-for-bit to the classical transport.
+
+\paragraph{Canonical dark numbers}
+\begin{center}\small
+\begin{tabular}{@{}R{0.40\textwidth}R{0.55\textwidth}@{}}
+\toprule
+\textbf{result} & \textbf{value} \\
+\midrule
+OOE scalar (light majoron, $m_X\!\lesssim\!1$, $\sim$100 keV decay) & $\Neff=3.079$, $\Yp=0.2470$, $\DoverH=2.45\times10^{-5}$ \\
+thermal/overabundant majoron ($m_J{=}5$, $5\times$BE) & $\dNeff=+2.43$ (energy/number conserving) \\
+strong $\chi\leftrightarrow\nu$ ($m_\chi{=}1$, $K{=}100\,\GF^2$) & $\Neff\approx3.99$ (interim; $\sim$1--2.5\% shape systematic on $\Yp$/$\DoverH$) \\
+\bottomrule
+\end{tabular}
+\end{center}
+The $\dNeff=+2.43$ entry is a differential and QED-baseline-independent (unchanged
+by the NLO default).  Of the two absolute $\Neff$, the OOE-scalar $3.079$ is at the
+LO baseline and shifts by the NLO $\approx-9.5\times10^{-4}$ ($\to3.078$), while the
+strong-$\chi$ $\approx3.99$ carries a $\sim$1--2.5\% shape systematic
+(Section~\ref{sec:chinustatus}) that dwarfs any NLO baseline shift.  The
+genuine-QKE numbers (the vacuum $\dNeff=+7.6\times10^{-4}$, the pinned comparison,
+the matrix-collision shift, the $\sim10^{-5}$
+coherences) live with their derivation in Section~\ref{sec:qke}.
+
+% ===========================================================================
+\section{Scanning and extending the dark sectors}
+\label{sec:darkextend}
+% ===========================================================================
+
+The general guidance of Section~\ref{sec:extend} (precision, gradients, scans,
+fixed structure) applies unchanged; this section adds what is specific to the
+dark sectors.
+
+\paragraph{Scanning a dark model}  The \code{BosonDecaySector} and
+\code{ChiSector} fields (\code{m_x}, \code{gsq_diag}, \code{tratio}; \code{m_chi},
+\code{Kflav}) are dynamic \code{equinox} leaves, so a mass/coupling scan compiles
+once and re-runs; build the solver with a sector of the right shape and vary the
+leaves.  Vary the initial abundance through \code{f_x0} / \code{f_chi0} (a scaled
+equilibrium shape for a frozen-out or over-abundant species).
+
+\paragraph{Adding a new BSM interaction}  The recipe mirrors how the decay and
+$\chi$ sectors were added:
+\begin{enumerate}[nosep]
+\item \textbf{Derive the squared matrix element} $|M|^2$ for the new
+  $\nu$-coupled process (the headless-FeynCalc workflow in \code{dark_amplitudes/}
+  on the BURST repository's \code{dark} branch is the template, with its internal
+  $+$ literature gates).
+\item \textbf{Angular-reduce it} to a per-output-bin energy quadrature and write
+  it as a kernel returning $(\mathrm{net},\mathrm{frs})$, following the existing
+  templates: a $1\!\leftrightarrow\!2$ (inverse-)decay like \code{dv_nu}, or a
+  $2\!\to\!2$ contact like the $\chi$/SM-lepton family.
+\item \textbf{Wire it into the RHS with the correct gating}
+  (Section~\ref{sec:darkgate}): a smooth $1\!\leftrightarrow\!2$ kernel is
+  added ungated after the SM gate; a cancelling $2\!\to\!2$ kernel
+  keeps the $\Tcm^5$ convention and gets its own separate gate (never
+  folded into the SM denominator).  Add the new species' $\rho$ to the Hubble
+  rate (the \code{rho_extra} of \code{decoupling._background}), and carry its
+  occupation as a new state component.
+\item \textbf{For a stiff sector}, add the affine $A-Bf$ form so the
+  exponential-midpoint head can integrate it (the dark decay heads are the
+  template); for an out-of-equilibrium decay, the redshifting-feature machinery
+  of Section~\ref{sec:darksolvers} applies.
+\item \textbf{Validate} against a brute-force evaluation of the collision
+  integral and the conservation sum rules (the dark sectors have no Fortran
+  oracle), and check that the sector switched off leaves the SM pins bitwise
+  unchanged.
+\end{enumerate}
+The nearest worked example is the $\chi\leftrightarrow\nu$ contact sector
+(Section~\ref{sec:chinu}): its amplitudes, kernels, and strong-coupling solver
+exist and are usable; the one open piece is the principled off-grid closure that
+would retire the cap band-aids (Section~\ref{sec:chinufix}).
 
 \appendix
 % ===========================================================================

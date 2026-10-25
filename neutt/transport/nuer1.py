@@ -128,7 +128,7 @@ def _topbot(kind, p1, e2, q2, e3, q3):
 
 
 def nuer1_rates(grid: EpsGrid, occ, meps, tcmpl, phie, n_gl: int = 5, n_lag: int = 5,
-                fd_cap_logC: float = float("inf"), fd_decay: bool = False,
+                range_limit=False, fd_cap_logC: float = float("inf"), fd_decay: bool = False,
                 monotone_read: bool = False,
                 lag_tail_fix: bool = True, lag_tail_gap: float = _LAG_TAIL_GAP):
     """ν–e± (R1) rates, the reference implementation.
@@ -141,8 +141,9 @@ def nuer1_rates(grid: EpsGrid, occ, meps, tcmpl, phie, n_gl: int = 5, n_lag: int
         m_e/T_cm, T_cm/T_pl and μ_e/T_pl (may be traced).
     n_gl, n_lag : int
         Legendre / Laguerre points (BURST's lgndrbins = lagurbins = 5).
-    fd_cap_logC, fd_decay, monotone_read
+    range_limit, fd_cap_logC, fd_decay, monotone_read
         Off-grid closures of the f(p4) read (see ``interp``); the defaults are BURST's read.
+        ``range_limit`` is the dark sectors' (strong-χ) window-max cap.
     lag_tail_fix, lag_tail_gap
         The Laguerre tail for wide regime-A bins and its ecut1 − ecut3 threshold [T_cm units]
         (module docstring); ``lag_tail_fix=False`` is bit-faithful to BURST.
@@ -233,7 +234,8 @@ def nuer1_rates(grid: EpsGrid, occ, meps, tcmpl, phie, n_gl: int = 5, n_lag: int
 
             fe3 = jnp.stack([_fd(E3, tcmpl, phie, 1.0), _fd(E3, tcmpl, phie, -1.0)])  # (nn,N,A,B)
             p4 = jnp.maximum(p1[:, None, None] + E2[:, :, None] - E3, 0.0)            # (N,A,B)
-            fnu4 = jnp.exp(interp_log_occ_dynamic(logf, eps, p4, fd_cap_logC=fd_cap_logC, fd_decay=fd_decay,
+            fnu4 = jnp.exp(interp_log_occ_dynamic(logf, eps, p4, range_limit=range_limit,
+                                                  fd_cap_logC=fd_cap_logC, fd_decay=fd_decay,
                                                   monotone_read=monotone_read))  # (3,2,N,A,B)
 
             # occupation factors (get_f_nuer1), axes (nn, m, n, N, A, B)

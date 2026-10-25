@@ -207,7 +207,7 @@ def _sel_mask(sel, gap, e3, ecut1):
 
 
 def nuer2_rates(grid: EpsGrid, occ, meps, tcmpl, phie, n_gl: int = 5, n_lag: int = 5,
-                fd_cap_logC: float = float("inf"), fd_decay: bool = False,
+                range_limit=False, fd_cap_logC: float = float("inf"), fd_decay: bool = False,
                 monotone_read: bool = False,
                 lag_tail_fix: bool = True, lag_tail_gap: float = _LAG_TAIL_GAP):
     """ν–e± (R2) rates, the reference implementation.
@@ -296,7 +296,8 @@ def nuer2_rates(grid: EpsGrid, occ, meps, tcmpl, phie, n_gl: int = 5, n_lag: int
 
                 fe2 = jnp.stack([_fd(E2, tcmpl, phie, 1.0), _fd(E2, tcmpl, phie, -1.0)])  # (nn,N,K,J)
                 p4 = jnp.maximum(p1[:, None, None] + E2 - E3[:, :, None], 0.0)            # (N,K,J)
-                fnu4 = jnp.exp(interp_log_occ_dynamic(logf, eps, p4, fd_cap_logC=fd_cap_logC, fd_decay=fd_decay,
+                fnu4 = jnp.exp(interp_log_occ_dynamic(logf, eps, p4, range_limit=range_limit,
+                                                      fd_cap_logC=fd_cap_logC, fd_decay=fd_decay,
                                                       monotone_read=monotone_read))  # (3,2,N,K,J)
 
                 # occupation factors (get_f_nuer2 = get_f_nuer1), axes (nn, m, n, N, K, J)
