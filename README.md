@@ -33,14 +33,7 @@ arguments are traced, so calling it again with new values does not recompile.
   option and solver, with the physics and the numerical-design rationale.
 - **API reference:** the Sphinx site built from `docs/sphinx/` (`pip install "neutt[docs]"`, then
   `sphinx-build docs/sphinx docs/sphinx/_build`).
-- **Quickstart:** [`docs/USER_MANUAL.md`](docs/USER_MANUAL.md).
 
-## Releasing
-
-`.github/workflows/release.yml` builds the sdist and wheel on every `v*` tag and publishes them to
-PyPI by trusted publishing. Register this repository on PyPI as a trusted publisher for `neutt`
-(workflow `release.yml`, environment `pypi`), set the version in `neutt/__init__.py`, then push a
-tag such as `v0.1.0`.
 
 ## License
 
