@@ -9,20 +9,17 @@ shift into the free gas instead would double-count).  φ_e = μ_e/T_pl is fixed 
 neutrality with the baryons, n_{e⁻} − n_{e⁺} = q_baryon·n_b, independently of the ν degeneracy ξ.
 """
 
-from __future__ import annotations
-
 import diffrax
 import jax
 import jax.numpy as jnp
 
-from .constants import ALPHA_FS, HBAR, M_ELECTRON, MPL, PI, ZETA3
+from .constants import ALPHA_FS, HBAR, M_ELECTRON, MPL, PI, ZETA3, _FD_CUTOFF
 from .grid import gauss_laguerre_plain, legendre_canonical
 
-# BURST's 25-node plain Gauss–Laguerre rule (the φ_e and QED integrals) and its occupation cutoff
-# (zero above E/T = 300, as fd/be_equil_calc).
+# BURST's 25-node Gauss–Laguerre rule for integrals of the form \int_0^\infty e^{-x}f(x) dx.  Appears 
+# in e φ_e and QED integrals.  Occupation cutoff hardcoded at E/T = 300.
 _N_DEFAULT = 25
-_X_DEFAULT, _W_DEFAULT = gauss_laguerre_plain(_N_DEFAULT)
-_FD_CUTOFF = 300.0
+_X_DEFAULT, _W_DEFAULT = gauss_laguerre_plain(_N_DEFAULT) # calls scipy; fine, since grids are set up outside jit
 
 
 # ==== free-gas e± and γ =========================================================================

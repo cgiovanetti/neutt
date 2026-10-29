@@ -30,3 +30,6 @@ ZETA3 = 1.202056903159594
 # composite Boole's rule: interior weights (×h) cycled over panels, end points 14/45
 BR_COEFFS = (64.0 / 45.0, 24.0 / 45.0, 64.0 / 45.0, 28.0 / 45.0)
 BR_END = 14.0 / 45.0
+
+# Occupation cutoff hardcoded at E/T = 300.
+_FD_CUTOFF = 300.0
