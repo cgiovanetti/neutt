@@ -9,6 +9,10 @@ shift into the free gas instead would double-count).  φ_e = μ_e/T_pl is fixed 
 neutrality with the baryons, n_{e⁻} − n_{e⁺} = q_baryon·n_b, independently of the ν degeneracy ξ.
 """
 
+#   import jax, neutt; from neutt import thermo as T
+#   f = jax.jit(lambda t: T.qed_plasma_deltas(t, T.solve_phie(t, 1.02, T.ETA0_DEFAULT), nlo=True))
+#   with jax.log_compiles(True): print(f(1.0)); print(f(0.9))
+
 import diffrax
 import jax
 import jax.numpy as jnp
@@ -378,7 +382,7 @@ def qed_eos_corrections(tplmev, phie=0.0, m_e=M_ELECTRON):
     dx = _W_DEFAULT
 
     dmeeps2, dmedteps, dmedt2, dmgeps2, dmgdteps, dmgdt2 = get_eg_mass_renorm(
-        tplmev, phie, x, dx, m_e=m_e
+        tplmev, phie, m_e=m_e
     )
 
     mt = m_e / tplmev                      # bare m_e / T_pl
