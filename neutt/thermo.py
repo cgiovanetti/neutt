@@ -7,7 +7,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 
-from .constants import ALPHA_FS, HBAR, M_ELECTRON, MPL, PI, ZETA3, _FD_CUTOFF, _EXP_MAX, ETA0_DEFAULT, N_GAMMA, _N_NU_DEFAULT, T0CMB
+from .constants import ALPHA_FS, HBAR, M_ELECTRON, MPL, ZETA3, _FD_CUTOFF, _EXP_MAX, ETA0_DEFAULT, N_GAMMA, _N_NU_DEFAULT, T0CMB
 from .grid import gauss_laguerre_plain, legendre_canonical
 
 
@@ -27,7 +27,7 @@ def rho_gamma(T):
     float or array
         Units of MeV^4.
     """
-    return PI**2 / 15.0 * T**4
+    return jnp.pi**2 / 15.0 * T**4
 
 
 def pressure_gamma(T):
@@ -87,7 +87,7 @@ def rho_nu(T_nu, n_nu=_N_NU_DEFAULT):
     float or array
         Units of MeV^4.
     """
-    return n_nu * 7.0 / 8.0 * PI**2 / 15.0 * T_nu**4
+    return n_nu * 7.0 / 8.0 * jnp.pi**2 / 15.0 * T_nu**4
 
 
 def hubble(rho_tot):
@@ -104,7 +104,7 @@ def hubble(rho_tot):
     float or array
         Units of s^-1.
     """
-    return jnp.sqrt(8.0 * PI * rho_tot / (3.0 * MPL**2)) / HBAR
+    return jnp.sqrt(8.0 * jnp.pi * rho_tot / (3.0 * MPL**2)) / HBAR
 
 
 def neff(T_nu, T_gamma, n_nu=_N_NU_DEFAULT):
@@ -297,7 +297,7 @@ class Thermo(eqx.Module):
         z = m / T
         e = jnp.sqrt(x**2 + z**2)               # E/T
         occ = _fd(e, phi) + _fd(e, -phi)        # electrons + positrons
-        return T**4 / PI**2 * jnp.sum(w * x**2 * e * occ)
+        return T**4 / jnp.pi**2 * jnp.sum(w * x**2 * e * occ)
 
     def pressure_electron(self, T, phi=0.0, m=M_ELECTRON):
         """
@@ -321,7 +321,7 @@ class Thermo(eqx.Module):
         z = m / T
         e = jnp.sqrt(x**2 + z**2)
         occ = _fd(e, phi) + _fd(e, -phi)
-        return T**4 / (3.0 * PI**2) * jnp.sum(w * x**4 / e * occ)
+        return T**4 / (3.0 * jnp.pi**2) * jnp.sum(w * x**4 / e * occ)
 
     def rho_plasma(self, T, phi=0.0, m=M_ELECTRON):
         """
@@ -384,8 +384,8 @@ class Thermo(eqx.Module):
         z = m / T
         e = jnp.sqrt(x**2 + z**2)
         f = _fd(e, 0.0)
-        drho_e = 2.0 * T**3 / PI**2 * jnp.sum(w * x**2 * (x**2 + z**2) * f * (1.0 - f))
-        return 4.0 * PI**2 * T**3 / 15.0 + drho_e
+        drho_e = 2.0 * T**3 / jnp.pi**2 * jnp.sum(w * x**2 * (x**2 + z**2) * f * (1.0 - f))
+        return 4.0 * jnp.pi**2 * T**3 / 15.0 + drho_e
 
     def drho_plasma_dT_phi(self, T, phi, m=M_ELECTRON):
         """
@@ -435,7 +435,7 @@ class Thermo(eqx.Module):
         cE = jnp.cosh(jnp.where(in_range, E, 0.0))          # finite (cosh(0)=1 in masked bins)
         diff = jnp.sinh(phi) / (cE + jnp.cosh(phi))         # f(E−φ)−f(E+φ), cancellation-free
         diff = jnp.where(in_range, diff, 0.0)               # occupation cutoff
-        return jnp.sum(w * x**2 * diff) / PI**2
+        return jnp.sum(w * x**2 * diff) / jnp.pi**2
 
     def _dnet_dphi_over_T3(self, phi, mt):
         """
@@ -462,7 +462,7 @@ class Thermo(eqx.Module):
         cE = jnp.cosh(jnp.where(in_range, E, 0.0))
         cphi = jnp.cosh(phi)
         integ = x**2 * (cE * cphi + 1.0) / (cE + cphi) ** 2
-        return jnp.sum(w * jnp.where(in_range, integ, 0.0)) / PI**2
+        return jnp.sum(w * jnp.where(in_range, integ, 0.0)) / jnp.pi**2
 
     def solve_phie(self, tplmev, tcmpl, eta0, q_baryon=0.5, m_e=M_ELECTRON, n_newton=6):
         """
@@ -547,12 +547,12 @@ class Thermo(eqx.Module):
                       dx * exp_E * (jnp.exp(-phie) * occ1**2 + jnp.exp(phie) * occ2**2), 0.0)
         )
 
-        two_a_over_pi = 2.0 * a / PI
-        four_a_over_pi = 4.0 * a / PI
+        two_a_over_pi = 2.0 * a / jnp.pi
+        four_a_over_pi = 4.0 * a / jnp.pi
 
-        dmeeps2 = 2.0 * PI * a / 3.0 + two_a_over_pi * intval
-        dmedteps = 4.0 * PI * a / 3.0 + two_a_over_pi * intvaldt
-        dmedt2 = 4.0 * PI * a / 3.0 + two_a_over_pi * (intvaldt + intvaldt2)
+        dmeeps2 = 2.0 * jnp.pi * a / 3.0 + two_a_over_pi * intval
+        dmedteps = 4.0 * jnp.pi * a / 3.0 + two_a_over_pi * intvaldt
+        dmedt2 = 4.0 * jnp.pi * a / 3.0 + two_a_over_pi * (intvaldt + intvaldt2)
 
         dmgeps2 = four_a_over_pi * intval
         dmgdteps = four_a_over_pi * intvaldt
@@ -672,7 +672,7 @@ class Thermo(eqx.Module):
         intval4 = jnp.sum(jnp.where(y_in, dy * (y**2 + mt**2) * (ip + im) * osq, 0.0), axis=1)
         intval5 = jnp.sum(jnp.where(y_in, dy * y * (ip - im) * osq, 0.0), axis=1)
 
-        pref = -(mt**2) * ALPHA_FS / PI
+        pref = -(mt**2) * ALPHA_FS / jnp.pi
         nz = jnp.atleast_1d(peps) != 0.0                 # peps==0 -> dmep = 0
         dmep1 = jnp.where(nz, pref * intval, 0.0)
         dmep2 = jnp.where(nz, pref * (intval + intval2), 0.0)
@@ -719,8 +719,8 @@ class Thermo(eqx.Module):
         occ2 = _fd_equil(exm, -phie)                 # e+ (etadeg = -phie)
         occ_e = occ1 + occ2
 
-        pref4 = tplmev**4 / PI**2              # ρ, P normalization [MeV⁴]
-        pref3 = tplmev**3 / PI**2             # dρ/dT normalization [MeV³]
+        pref4 = tplmev**4 / jnp.pi**2              # ρ, P normalization [MeV⁴]
+        pref3 = tplmev**3 / jnp.pi**2             # dρ/dT normalization [MeV³]
 
         # --- photon correction pieces ---
         d_rho_gamma = pref4 * jnp.sum(-dx / 4.0 * x * (dmgeps2 + dmgdteps) * occ_be)
@@ -786,8 +786,8 @@ class Thermo(eqx.Module):
 
         dmep1, dmep2, dmep3, dmep4, dmep5 = self.get_e_mass_pdep(tplmev, phie, x, m_e=m_e)
 
-        pref4 = tplmev**4 / PI**2
-        pref3 = tplmev**3 / PI**2
+        pref4 = tplmev**4 / jnp.pi**2
+        pref3 = tplmev**3 / jnp.pi**2
 
         d_rho_e = pref4 * jnp.sum(-dx / 4.0 * (x / exm * dmep2 + exm * dmep3) * occ_e)
         d_P_e = pref4 * jnp.sum(-dx / 4.0 * x / exm * dmep1 * occ_e)
@@ -824,11 +824,11 @@ class Thermo(eqx.Module):
         in_range = exm <= _FD_CUTOFF                          # exp argument masked against inf/inf
         fd = jnp.where(in_range, 2.0 / (jnp.exp(jnp.where(in_range, exm, 0.0)) + 1.0), 0.0)
         jint = jnp.sum(dx * (2.0 * x**2 + mt**2) / exm * fd)  # dimensionless J
-        e3 = (4.0 * PI * ALPHA_FS) ** 1.5                     # e³
+        e3 = (4.0 * jnp.pi * ALPHA_FS) ** 1.5                     # e³
         # J^{3/2} at J = 0 has an infinite second derivative (inf·0 = NaN): evaluate it at J > 0 only
         pos = jint > 0.0
         jint_pos = jnp.where(pos, jint, 1.0)
-        return jnp.where(pos, e3 / (12.0 * PI**4) * tplmev**4 * jint_pos**1.5, 0.0)
+        return jnp.where(pos, e3 / (12.0 * jnp.pi**4) * tplmev**4 * jint_pos**1.5, 0.0)
 
     def qed_eos_e3_deltas(self, tplmev, m_e=M_ELECTRON):
         """
