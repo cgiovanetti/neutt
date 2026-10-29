@@ -9,16 +9,16 @@ shift into the free gas instead would double-count).  φ_e = μ_e/T_pl is fixed 
 neutrality with the baryons, n_{e⁻} − n_{e⁺} = q_baryon·n_b, independently of the ν degeneracy ξ.
 """
 
-#   import jax, neutt; from neutt.thermo import Thermo, ETA0_DEFAULT
-#   th = Thermo(); f = jax.jit(lambda t: th.qed_plasma_deltas(t, th.solve_phie(t, 1.02, ETA0_DEFAULT), nlo=True))
-#   with jax.log_compiles(True): print(f(1.0)); print(f(0.9))
+# import jax, neutt; from neutt.thermo import Thermo, ETA0_DEFAULT
+# th = Thermo(); f = jax.jit(lambda t: th.qed_plasma_deltas(t, th.solve_phie(t, 1.02, ETA0_DEFAULT), nlo=True))
+# with jax.log_compiles(True): print(f(1.0)); print(f(0.9))
 
 import diffrax
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 
-from .constants import ALPHA_FS, HBAR, M_ELECTRON, MPL, PI, ZETA3, _FD_CUTOFF, _EXP_MAX, ETA0_DEFAULT, N_GAMMA, _N_NU_DEFAULT
+from .constants import ALPHA_FS, HBAR, M_ELECTRON, MPL, PI, ZETA3, _FD_CUTOFF, _EXP_MAX, ETA0_DEFAULT, N_GAMMA, _N_NU_DEFAULT, T0CMB
 from .grid import gauss_laguerre_plain, legendre_canonical
 
 
@@ -34,16 +34,12 @@ def pressure_gamma(T):
     return rho_gamma(T) / 3.0
 
 
-# (T_γ/T_cm)³ today for instantaneous e± annihilation: carries η0 (quoted at today's photon
-# temperature) onto the comoving T_cm.  The true ratio differs by ~0.2%, irrelevant for φ_e.
-_ELEVEN_OVER_FOUR = 11.0 / 4.0
-
-
-def nb_over_Tcm3(eta0):
-    """n_b/T_cm³ for the present baryon-to-photon ratio ``eta0``: η0·N_GAMMA·(11/4)."""
-    return eta0 * N_GAMMA * _ELEVEN_OVER_FOUR
-
-
+def nb_over_Tcm3(eta0, ratio_today):
+    """n_b/T_cm³, conserved: today's n_b = η0·n_γ(T0CMB) at T_cm,0 = T0CMB/``ratio_today``, with
+    ``ratio_today`` = T_γ/T_cm after e± annihilation (an output of the transport solve)."""
+    n_b0 = eta0 * N_GAMMA * T0CMB**3
+    T_cm0 = T0CMB / ratio_today
+    return n_b0 / T_cm0**3
 
 
 def rho_nu(T_nu, n_nu=_N_NU_DEFAULT):
@@ -92,12 +88,18 @@ def _be(x):
 
 # ==== the plasma model ===========================================================================
 
+# T_γ/T_cm after e± annihilation in the Standard Model, from this code's reference solve (the
+# manual's pins); it converts η0 to n_b and plays the role of BURST's sfsi.
+RATIO_TODAY_SM = 1.3979608
+
+
 class Thermo(eqx.Module):
     """e±/γ plasma thermodynamics on fixed Gauss rules, built once here and shared by every method.
 
     ``N_qed`` plain Gauss–Laguerre nodes for φ_e and the QED corrections, ``N_free`` for the
     free-gas e± EoS, and the ``N_lg`` Legendre + ``N_lag`` Laguerre inner rules of the
-    momentum-dependent self-energy (BURST: 25, 25, 50, 100).
+    momentum-dependent self-energy (BURST: 25, 25, 50, 100).  ``ratio_today`` is T_γ/T_cm after
+    e± annihilation, which converts η0 to n_b (``nb_tcm3``); the Standard-Model value by default.
     """
 
     N_qed: int = eqx.field(static=True)
@@ -112,13 +114,19 @@ class Thermo(eqx.Module):
     w_lg: jnp.ndarray
     t_lag: jnp.ndarray
     w_lag: jnp.ndarray
+    ratio_today: float
 
-    def __init__(self, N_qed=80, N_free=100, N_lg=50, N_lag=100):
+    def __init__(self, N_qed=80, N_free=100, N_lg=50, N_lag=100, ratio_today=RATIO_TODAY_SM):
         self.N_qed, self.N_free, self.N_lg, self.N_lag = int(N_qed), int(N_free), int(N_lg), int(N_lag)
         self.x_qed, self.w_qed = gauss_laguerre_plain(self.N_qed)
         self.x_free, self.w_free = gauss_laguerre_plain(self.N_free)
         self.t_lg, self.w_lg = legendre_canonical(self.N_lg)
         self.t_lag, self.w_lag = gauss_laguerre_plain(self.N_lag)
+        self.ratio_today = ratio_today
+
+    def nb_tcm3(self, eta0):
+        """n_b/T_cm³ for the present baryon-to-photon ratio ``eta0`` at this ``ratio_today``."""
+        return nb_over_Tcm3(eta0, self.ratio_today)
 
     # ---- free-gas e± and γ ----------------------------------------------------------------------
 
@@ -205,7 +213,7 @@ class Thermo(eqx.Module):
     def solve_phie(self, tplmev, tcmpl, eta0, q_baryon=0.5, m_e=M_ELECTRON, n_newton=6):
         """Charge-neutral electron degeneracy φ_e = μ_e/T_pl at T_pl = tplmev [MeV], tcmpl = T_cm/T_pl.
 
-        Solves (n_{e⁻} − n_{e⁺})/T_pl³ = q_baryon·nb_over_Tcm3(eta0)·tcmpl³ with ``n_newton`` unrolled
+        Solves (n_{e⁻} − n_{e⁺})/T_pl³ = q_baryon·nb_tcm3(eta0)·tcmpl³ with ``n_newton`` unrolled
         Newton steps (6 is ample) from an asinh seed; φ_e ≥ 0 for q_baryon > 0.  Valid while
         T_pl > m_e/300 ≈ 1.7 keV (from T_init = 10 MeV, ln a ≲ 8.8): below it BURST's E/T > 300
         occupation cutoff removes every quadrature node and the result is NaN.
@@ -219,7 +227,7 @@ class Thermo(eqx.Module):
             (to ~0.87) only below where φ_e affects N_eff.
         """
         mt = m_e / tplmev
-        target = q_baryon * nb_over_Tcm3(eta0) * tcmpl**3        # (n_{e⁻}−n_{e⁺})/T_pl³ required
+        target = q_baryon * self.nb_tcm3(eta0) * tcmpl**3        # (n_{e⁻}−n_{e⁺})/T_pl³ required
 
         # seed: net ≈ slope(0)·sinh φ for φ ≪ 1
         slope0 = self._dnet_dphi_over_T3(0.0, mt)
@@ -237,7 +245,7 @@ class Thermo(eqx.Module):
         Equals solve_phie to machine precision at high T (φ_e ~ 1e-9).
         """
         mt = m_e / tplmev
-        target = q_baryon * nb_over_Tcm3(eta0) * tcmpl**3
+        target = q_baryon * self.nb_tcm3(eta0) * tcmpl**3
         return target / self._dnet_dphi_over_T3(0.0, mt)
 
     # ---- finite-T QED mass renormalization (δm_e², δm_γ²) ----------------------------------------

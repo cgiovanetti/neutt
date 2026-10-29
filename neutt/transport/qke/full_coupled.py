@@ -28,7 +28,7 @@ import numpy as np
 from ...constants import M_ELECTRON, PI, SIN2THW   # noqa: F401  (PI: pinned ν–ν code)
 from ...grid import EpsGrid, make_eps_grid       # noqa: F401  (EpsGrid: pinned ν–ν code)
 from ...interp import FD_ENVELOPE_C
-from ...thermo import ETA0_DEFAULT, Thermo, nb_over_Tcm3
+from ...thermo import ETA0_DEFAULT, Thermo
 from .. import assemble as A
 from ..nunu import build_nunu_kernel
 from ..nunubar import build_nunubar_kernel
@@ -267,7 +267,7 @@ def make_full_coupled_solver(grid=None, *, thermo=None, mixing=True, include_mat
         Add the thermal (C-even, G_F²) MSW potential from the e± energy density.
     include_matter_asym : bool
         Add the asymmetric ("solar", linear-G_F) MSW potential √2 G_F n_p on the ee entry, with
-        n_p = q_baryon·nb_over_Tcm3(eta0)·T_cm³.  It is the one ξ = 0 term that breaks ν ↔ ν̄, and
+        n_p = q_baryon·thermo.nb_tcm3(eta0)·T_cm³.  It is the one ξ = 0 term that breaks ν ↔ ν̄, and
         seeds an η_b-sized flavour asymmetry ρ_aa(ν) − ρ_aa(ν̄) (read it from ``diag_fr`` or
         ``rho_final``).  Default off, bit-identical to the solve without it.
     n_steps : int
@@ -408,10 +408,10 @@ def make_full_coupled_solver(grid=None, *, thermo=None, mixing=True, include_mat
     #     return x if P_op is None else jnp.maximum(_prolong1(x), 0.0)
     # φ_e at the live state: charge neutrality for phie="auto", else the float as given
     phie_auto = isinstance(phie, str) and phie == "auto"
-    _eta0 = ETA0_DEFAULT if eta0 is None else eta0
+    eta0_default = ETA0_DEFAULT if eta0 is None else eta0
 
-    def _phie_at(T_pl, T_cm, me):
-        return (thermo.solve_phie(T_pl, T_cm / T_pl, _eta0, q_baryon, m_e=me)
+    def _phie_at(T_pl, T_cm, me, eta0):
+        return (thermo.solve_phie(T_pl, T_cm / T_pl, eta0, q_baryon, m_e=me)
                 if phie_auto else phie)
     # # self-interaction source-moment weights (diff_pow=2 number-like, sum_pow=3 energy-like)
     # we_diff = (w * eps**2)[:, None, None]    # (N,1,1) for nudiff = Σ w ε²(ρ−ρ̄)
@@ -485,14 +485,11 @@ def make_full_coupled_solver(grid=None, *, thermo=None, mixing=True, include_mat
     stride = max(1, n_steps // n_frames)
     frame_idx = jnp.arange(0, n_steps, stride)
 
-    # asymmetric MSW: n_p = q_baryon·nb_coeff·T_cm³ [MeV³], the baryon charge the e± gas balances
-    nb_coeff = nb_over_Tcm3(_eta0)
-
-    def _hamiltonian(T_cm, T_pl, me, sia=z33, sis=z33, asym_scale=1.0):
+    def _hamiltonian(T_cm, T_pl, me, eta0, sia=z33, sis=z33, asym_scale=1.0):
         """Coherent H (2,N,3,3) [s⁻¹]: vacuum [+ thermal MSW] [+ asymmetric MSW]; ν–ν terms zero."""
         if include_matter:
             # rho_electron returns e⁻+e⁺, so a single call is the full e± density.
-            therm = thermo.rho_electron(T_pl, _phie_at(T_pl, T_cm, me), me)
+            therm = thermo.rho_electron(T_pl, _phie_at(T_pl, T_cm, me, eta0), me)
             _, mats = coherent.matter_terms(therm, 0.0)
         else:
             mats = z33
@@ -501,7 +498,7 @@ def make_full_coupled_solver(grid=None, *, thermo=None, mixing=True, include_mat
             # sign flip sits on the vacuum and thermal terms, not on this one (the lab-frame
             # equivalent flips the asymmetric term instead; Nötzold–Raffelt).  asym_scale (traced)
             # multiplies n_p: 0 null, 1 physical η_b, > 1 an enhanced source.
-            npro = asym_scale * q_baryon * nb_coeff * T_cm**3
+            npro = asym_scale * q_baryon * thermo.nb_tcm3(eta0) * T_cm**3   # n_p = q_baryon·n_b [MeV³]
             mata, _ = coherent.matter_terms(0.0, npro)
         else:
             mata = z33
@@ -522,10 +519,13 @@ def make_full_coupled_solver(grid=None, *, thermo=None, mixing=True, include_mat
                          'transport rate.')
 
     @jax.jit
-    def solve(T_init=10.0, lna_max=7.0, delta_neff_init=0.0, me=None, xi=None, matter_asym_scale=1.0):
+    def solve(T_init=10.0, lna_max=7.0, delta_neff_init=0.0, me=None, xi=None, matter_asym_scale=1.0,
+              eta0=None):
         compiling()
         if me is None:
             me = M_ELECTRON
+        if eta0 is None:
+            eta0 = eta0_default
         T_init = jnp.asarray(T_init, dtype=jnp.float64)
         _asym_scale = jnp.asarray(matter_asym_scale, dtype=jnp.float64)
         # a passed xi recomputes both from the traced value (compute_prec_trans's
@@ -614,9 +614,9 @@ def make_full_coupled_solver(grid=None, *, thermo=None, mixing=True, include_mat
                 #     return jnp.where(eps_coh, coherent.hamiltonian(eps, T_cm_mid, m2w_zero, z33, z33,
                 #                                                    sia_m, sis_m), 0.0)
                 #
-                H = _hamiltonian(T_cm_mid, T_new, me, asym_scale=_asym_scale)      # (2,N,3,3) s⁻¹, H_si = 0
+                H = _hamiltonian(T_cm_mid, T_new, me, eta0, asym_scale=_asym_scale)  # (2,N,3,3) s⁻¹, H_si = 0
                 # Γ and the matrix collision are evaluated at the midpoint state
-                phie_mid = _phie_at(T_half, T_cm_mid, me)
+                phie_mid = _phie_at(T_half, T_cm_mid, me, eta0)
                 coh_gain = None     # the matrix collision's off-diagonal source (2,N,3,3)
                 if collision != "damping":
                     # Matrix collision dρ_ab/dt|coll = A_gain,ab − {B_loss, ρ}_ab.  Each matrix
@@ -723,8 +723,8 @@ def make_full_coupled_solver(grid=None, *, thermo=None, mixing=True, include_mat
                 # carried adiabatically instead of being kicked by a frozen H at every boundary.
                 # K = 0 in vacuum.  See the manual, "The moving eigenframe of the step".
                 K_fr = na.eigenframe_generator(
-                    _hamiltonian(T_init * jnp.exp(-lna0), T_pl, me, asym_scale=_asym_scale),
-                    _hamiltonian(T_init * jnp.exp(-(lna0 + dlna)), T_new, me, asym_scale=_asym_scale), dt)
+                    _hamiltonian(T_init * jnp.exp(-lna0), T_pl, me, eta0, asym_scale=_asym_scale),
+                    _hamiltonian(T_init * jnp.exp(-(lna0 + dlna)), T_new, me, eta0, asym_scale=_asym_scale), dt)
                 R_fr = na.unitary_exp(K_fr, 0.5 * dt)
                 R_frd = jnp.conj(jnp.swapaxes(R_fr, -1, -2))
                 rho_in = R_fr @ (rho if collision_coupling == "sourced" else rho_c) @ R_frd

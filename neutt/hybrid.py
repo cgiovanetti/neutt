@@ -20,7 +20,7 @@ import jax
 import jax.numpy as jnp
 
 from . import compiling
-from .constants import M_ELECTRON
+from .constants import ETA0_DEFAULT, M_ELECTRON
 from .decoupling import make_rhs, make_split_rates, nanrobust_rms_norm, neff_from_spectrum
 from .thermo import Thermo
 from .grid import make_eps_grid
@@ -86,17 +86,18 @@ def make_hybrid_solver(grid=None, *, thermo=None, lna_sw=1.5, n_head=1600, head_
     -------
     (solve, grid)
         ``solve(T_init=10.0, lna_max=7.5, rtol=1e-6, atol=1e-30, dtmax=0.08, delta_neff_init=0.0,
-        qual_tol=1e-4, me=None, xi=None)`` returns the keys of LINX's transport_adapter solver
+        qual_tol=1e-4, me=None, xi=None, eta0=None)`` returns the keys of LINX's transport_adapter solver
         (lna, T_pl, T_cm, ratio, f_traj, f_final, ratio_final, neff_final) plus diagnostics:
         ``qualified`` (False: the fallback ran; the result is correct either way), ``qss_dist``
         (max|f − A/B| at the handoff), the head_* sanity checks and tail_steps/tail_rejected/
-        tail_ok.  ``me`` [MeV] and ``xi`` may be passed per call as traced values (no recompile
-        across values); None means the bare mass and the build-time ``xi``.
+        tail_ok.  ``me`` [MeV], ``xi`` and ``eta0`` may be passed per call as traced values (no
+        recompile across values); None means the bare mass and the build-time ``xi``/``eta0``.
     """
     if grid is None:
         grid = make_eps_grid()
     if thermo is None:
         thermo = Thermo()
+    eta0_default = ETA0_DEFAULT if eta0 is None else eta0
     if nuratiotol is None:
         nuratiotol = A.NURATIOTOL
 
@@ -122,12 +123,14 @@ def make_hybrid_solver(grid=None, *, thermo=None, lna_sw=1.5, n_head=1600, head_
 
     @jax.jit
     def solve(T_init=10.0, lna_max=7.5, rtol=1e-6, atol=1e-30, dtmax=0.08,
-              delta_neff_init=0.0, qual_tol=1e-4, me=None, xi=None):
+              delta_neff_init=0.0, qual_tol=1e-4, me=None, xi=None, eta0=None):
         compiling()
         # qual_tol = 1e-4: ~2× the attractor distance at lna_sw = 1.5; rejects handoffs past ~1.7.
         # A passed me reaches the kernels, EoS and QED; it shifts the attractor mildly.
         if me is None:
             me = M_ELECTRON
+        if eta0 is None:
+            eta0 = eta0_default
         T_init = jnp.asarray(T_init, dtype=jnp.float64)
         # a passed xi recomputes the noise floor and initial state inside the jit
         if xi is None:

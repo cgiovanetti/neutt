@@ -36,6 +36,8 @@ BR_END = 14.0 / 45.0
 # solve passes its own value.
 ETA0_DEFAULT = 6.0913e-10
 N_GAMMA = 2.0 * ZETA3 / PI**2 # n_γ = N_GAMMA·T³ (g = 2).
+K_BOLTZMANN = 8.617333262e-11   # [MeV/K]
+T0CMB = 2.7255 * K_BOLTZMANN    # FIRAS CMB temperature today [MeV]
 _N_NU_DEFAULT = 3.0  # thermally populated flavours (ν + ν̄ each)
 
 # Occupation cutoff hardcoded at E/T = 300.
