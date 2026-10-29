@@ -13,7 +13,7 @@ import diffrax
 import jax
 import jax.numpy as jnp
 
-from .constants import ALPHA_FS, HBAR, M_ELECTRON, MPL, PI, ZETA3, _FD_CUTOFF
+from .constants import ALPHA_FS, HBAR, M_ELECTRON, MPL, PI, ZETA3, _FD_CUTOFF, _EXP_MAX
 from .grid import gauss_laguerre_plain, legendre_canonical
 
 # BURST's 25-node Gauss–Laguerre rule for integrals of the form \int_0^\infty e^{-x}f(x) dx.  Appears 
@@ -25,7 +25,6 @@ _X_DEFAULT, _W_DEFAULT = gauss_laguerre_plain(_N_DEFAULT) # calls scipy; fine, s
 # ==== free-gas e± and γ =========================================================================
 
 # The free-gas e± integrals use 100 nodes (BURST: 25), converged to ~1e-10.
-_EXP_MAX = 709.0   # largest exp argument kept (exp(709.8) overflows float64)
 _NQ = 100
 _X, _W = gauss_laguerre_plain(_NQ)
 
@@ -51,24 +50,24 @@ def pressure_gamma(T):
     return rho_gamma(T) / 3.0
 
 
-def rho_electron(T, phi=0.0, m=M_ELECTRON, nodes=None, weights=None):
+def rho_electron(T, phi=0.0, m=M_ELECTRON):
     """e⁻ + e⁺ energy density [MeV⁴]: (T⁴/π²)∫x²(E/T)[f₋+f₊]dx over x = p/T, with phi = μ/T.
 
     ``nodes``/``weights`` replace the 100-node plain Gauss–Laguerre rule (BURST's 25-node rule
     reproduces its quadrature bit-for-bit); ``m`` [MeV] is the bare electron mass by default.
     """
-    x = _X if nodes is None else jnp.asarray(nodes)
-    w = _W if weights is None else jnp.asarray(weights)
+    x = _X
+    w = _W
     z = m / T
     e = jnp.sqrt(x**2 + z**2)               # E/T
     occ = _fd(e, phi) + _fd(e, -phi)        # electrons + positrons
     return T**4 / PI**2 * jnp.sum(w * x**2 * e * occ)
 
 
-def pressure_electron(T, phi=0.0, m=M_ELECTRON, nodes=None, weights=None):
+def pressure_electron(T, phi=0.0, m=M_ELECTRON):
     """e⁻ + e⁺ pressure [MeV⁴]: (g/2π²)∫p²(p²/3E)[f₋+f₊]dp, g = 2; arguments as rho_electron."""
-    x = _X if nodes is None else jnp.asarray(nodes)
-    w = _W if weights is None else jnp.asarray(weights)
+    x = _X
+    w = _W
     z = m / T
     e = jnp.sqrt(x**2 + z**2)
     occ = _fd(e, phi) + _fd(e, -phi)
@@ -124,7 +123,7 @@ ETA0_DEFAULT = 6.0913e-10
 _ELEVEN_OVER_FOUR = 11.0 / 4.0
 
 
-def net_electron_number_over_T3(phi, mt, nodes=None, weights=None):
+def net_electron_number_over_T3(phi, mt):
     """Net electron number (n_{e⁻} − n_{e⁺})/T_pl³ at degeneracy φ, mt = m_e/T_pl.
 
     (1/π²)∫x²[f(E−φ) − f(E+φ)]dx (g = 2, x = p/T_pl, E = √(x²+mt²)), with the difference written
@@ -132,8 +131,8 @@ def net_electron_number_over_T3(phi, mt, nodes=None, weights=None):
     E > 300 is zeroed (BURST's cutoff).  ``nodes``/``weights``: plain Gauss–Laguerre rule over x
     (default 25 nodes).
     """
-    x = _X_DEFAULT if nodes is None else jnp.asarray(nodes)
-    w = _W_DEFAULT if weights is None else jnp.asarray(weights)
+    x = _X_DEFAULT
+    w = _W_DEFAULT
     E = jnp.sqrt(x**2 + mt**2)
     in_range = E < _FD_CUTOFF
     cE = jnp.cosh(jnp.where(in_range, E, 0.0))          # finite (cosh(0)=1 in masked bins)
@@ -142,14 +141,14 @@ def net_electron_number_over_T3(phi, mt, nodes=None, weights=None):
     return jnp.sum(w * x**2 * diff) / PI**2
 
 
-def _dnet_dphi_over_T3(phi, mt, nodes=None, weights=None):
+def _dnet_dphi_over_T3(phi, mt):
     """∂/∂φ of net_electron_number_over_T3, for Newton.
 
     d/dφ [sinh φ/(cosh E + cosh φ)] = (cosh E cosh φ + 1)/(cosh E + cosh φ)² ≥ 0, so the net
     number is monotone in φ.
     """
-    x = _X_DEFAULT if nodes is None else jnp.asarray(nodes)
-    w = _W_DEFAULT if weights is None else jnp.asarray(weights)
+    x = _X_DEFAULT
+    w = _W_DEFAULT 
     E = jnp.sqrt(x**2 + mt**2)
     in_range = E < _FD_CUTOFF
     cE = jnp.cosh(jnp.where(in_range, E, 0.0))
@@ -164,7 +163,7 @@ def nb_over_Tcm3(eta0):
 
 
 def solve_phie(tplmev, tcmpl, eta0, q_baryon=0.5, m_e=M_ELECTRON,
-               nodes=None, weights=None, n_newton=6):
+               n_newton=6):
     """Charge-neutral electron degeneracy φ_e = μ_e/T_pl at T_pl = tplmev [MeV], tcmpl = T_cm/T_pl.
 
     Solves (n_{e⁻} − n_{e⁺})/T_pl³ = q_baryon·nb_over_Tcm3(eta0)·tcmpl³ with ``n_newton`` unrolled
@@ -184,24 +183,24 @@ def solve_phie(tplmev, tcmpl, eta0, q_baryon=0.5, m_e=M_ELECTRON,
     target = q_baryon * nb_over_Tcm3(eta0) * tcmpl**3        # (n_{e⁻}−n_{e⁺})/T_pl³ required
 
     # seed: net ≈ slope(0)·sinh φ for φ ≪ 1
-    slope0 = _dnet_dphi_over_T3(0.0, mt, nodes, weights)
+    slope0 = _dnet_dphi_over_T3(0.0, mt)
     phi = jnp.arcsinh(target / slope0)
 
     for _ in range(n_newton):
-        f = net_electron_number_over_T3(phi, mt, nodes, weights) - target
-        fp = _dnet_dphi_over_T3(phi, mt, nodes, weights)
+        f = net_electron_number_over_T3(phi, mt) - target
+        fp = _dnet_dphi_over_T3(phi, mt)
         phi = phi - f / fp
     return jnp.where(slope0 > 0.0, phi, jnp.nan)   # NaN past the validity limit: fail loudly
 
 
-def phie_linear(tplmev, tcmpl, eta0, q_baryon=0.5, m_e=M_ELECTRON, nodes=None, weights=None):
+def phie_linear(tplmev, tcmpl, eta0, q_baryon=0.5, m_e=M_ELECTRON):
     """BURST's linearized charge-neutrality φ_e = target/(∂net/∂φ at φ = 0), for validation.
 
     Equals solve_phie to machine precision at high T (φ_e ~ 1e-9).
     """
     mt = m_e / tplmev
     target = q_baryon * nb_over_Tcm3(eta0) * tcmpl**3
-    return target / _dnet_dphi_over_T3(0.0, mt, nodes, weights)
+    return target / _dnet_dphi_over_T3(0.0, mt)
 
 
 # ==== finite-T QED mass renormalization (δm_e², δm_γ²) ===========================================
@@ -216,7 +215,7 @@ def _fd_equil(E, phie):
     return jnp.where(keep, f, 0.0)
 
 
-def get_eg_mass_renorm(tplmev, phie, nodes=None, weights=None, m_e=M_ELECTRON):
+def get_eg_mass_renorm(tplmev, phie, m_e=M_ELECTRON):
     """Momentum-independent thermal QED mass corrections (BURST's get_eg_mass_renorm).
 
     Returns (dmeeps2, dmedteps, dmedt2, dmgeps2, dmgdteps, dmgdt2), BURST's out-args in order:
@@ -224,12 +223,8 @@ def get_eg_mass_renorm(tplmev, phie, nodes=None, weights=None, m_e=M_ELECTRON):
     (dimensionless).  ``nodes``/``weights``: plain Gauss–Laguerre rule over x = p/T_pl (default 25
     nodes, as BURST); ``phie`` = μ_e/T_pl; ``m_e`` [MeV] may be traced.
     """
-    if nodes is None:
-        nodes = _X_DEFAULT
-    if weights is None:
-        weights = _W_DEFAULT
-    x = jnp.asarray(nodes)
-    dx = jnp.asarray(weights)
+    x = _X_DEFAULT
+    dx = _W_DEFAULT
 
     a = ALPHA_FS
     mt = m_e / tplmev                      # m_e / T_pl
@@ -264,25 +259,25 @@ def get_eg_mass_renorm(tplmev, phie, nodes=None, weights=None, m_e=M_ELECTRON):
     return dmeeps2, dmedteps, dmedt2, dmgeps2, dmgdteps, dmgdt2
 
 
-def delta_me2(tplmev, phie=0.0, nodes=None, weights=None, m_e=M_ELECTRON):
+def delta_me2(tplmev, phie=0.0, m_e=M_ELECTRON):
     """Electron thermal mass² δm_e² [MeV²] = dmeeps2·T_pl²."""
-    dmeeps2 = get_eg_mass_renorm(tplmev, phie, nodes, weights, m_e=m_e)[0]
+    dmeeps2 = get_eg_mass_renorm(tplmev, phie, m_e=m_e)[0]
     return dmeeps2 * tplmev**2
 
 
-def delta_mg2(tplmev, phie=0.0, nodes=None, weights=None, m_e=M_ELECTRON):
+def delta_mg2(tplmev, phie=0.0, m_e=M_ELECTRON):
     """Photon thermal mass² δm_γ² [MeV²] = dmgeps2·T_pl²."""
-    dmgeps2 = get_eg_mass_renorm(tplmev, phie, nodes, weights, m_e=m_e)[3]
+    dmgeps2 = get_eg_mass_renorm(tplmev, phie, m_e=m_e)[3]
     return dmgeps2 * tplmev**2
 
 
-def m_e_eff(tplmev, phie=0.0, nodes=None, weights=None, m_e=M_ELECTRON):
+def m_e_eff(tplmev, phie=0.0, m_e=M_ELECTRON):
     """Thermal effective electron mass √(m_e² + δm_e²) [MeV].
 
     Not used by the solvers: the EoS and the lepton kernels take the bare mass, and finite-T QED
     enters the EoS additively.
     """
-    return jnp.sqrt(m_e**2 + delta_me2(tplmev, phie, nodes, weights, m_e=m_e))
+    return jnp.sqrt(m_e**2 + delta_me2(tplmev, phie, m_e=m_e))
 
 
 # ---- momentum-dependent electron self-energy (BURST's second thermo loop) ----------------------
@@ -372,19 +367,15 @@ def _be(x):
     return jnp.where((x > 0.0) & (x <= _FD_CUTOFF), f, 0.0)
 
 
-def qed_eos_corrections(tplmev, phie=0.0, nodes=None, weights=None, m_e=M_ELECTRON):
+def qed_eos_corrections(tplmev, phie=0.0, m_e=M_ELECTRON):
     """Momentum-independent O(α) QED corrections to the e±/γ EoS (BURST's glag terms).
 
     Returns (d_rho_gamma, d_P_gamma, d_drho_gamma_dT, d_rho_e, d_P_e, d_drho_e_dT): δρ, δP [MeV⁴]
     and δ(dρ/dT) [MeV³], photon then e±, additive to the bare-mass free-gas EoS.  Arguments as
     get_eg_mass_renorm, whose self-energies are evaluated on the same rule.
     """
-    if nodes is None:
-        nodes = _X_DEFAULT
-    if weights is None:
-        weights = _W_DEFAULT
-    x = jnp.asarray(nodes)
-    dx = jnp.asarray(weights)
+    x = _X_DEFAULT
+    dx = _W_DEFAULT
 
     dmeeps2, dmedteps, dmedt2, dmgeps2, dmgdteps, dmgdt2 = get_eg_mass_renorm(
         tplmev, phie, x, dx, m_e=m_e
@@ -425,7 +416,7 @@ def qed_eos_corrections(tplmev, phie=0.0, nodes=None, weights=None, m_e=M_ELECTR
     return (d_rho_gamma, d_P_gamma, d_drho_gamma_dT, d_rho_e, d_P_e, d_drho_e_dT)
 
 
-def qed_eos_pdep_corrections(tplmev, phie=0.0, nodes=None, weights=None, m_e=M_ELECTRON,
+def qed_eos_pdep_corrections(tplmev, phie=0.0, m_e=M_ELECTRON,
                              **pdep_rules):
     """Momentum-dependent e± QED EoS corrections (BURST's second thermo loop).
 
@@ -434,12 +425,8 @@ def qed_eos_pdep_corrections(tplmev, phie=0.0, nodes=None, weights=None, m_e=M_E
     d_drho_e_dT [MeV³]), additive to qed_eos_corrections' e± terms.  BURST's dρ_e/dφ_e term
     (glag6) is not ported; it is negligible at φ_e ~ 1e-10.
     """
-    if nodes is None:
-        nodes = _X_DEFAULT
-    if weights is None:
-        weights = _W_DEFAULT
-    x = jnp.asarray(nodes)
-    dx = jnp.asarray(weights)
+    x = _X_DEFAULT
+    dx = _W_DEFAULT
 
     mt = m_e / tplmev
     exm = jnp.sqrt(x**2 + mt**2)
@@ -466,7 +453,7 @@ def qed_eos_pdep_corrections(tplmev, phie=0.0, nodes=None, weights=None, m_e=M_E
     return d_rho_e, d_P_e, d_drho_e_dT
 
 
-def qed_eos_e3_pressure(tplmev, m_e=M_ELECTRON, nodes=None, weights=None):
+def qed_eos_e3_pressure(tplmev, m_e=M_ELECTRON):
     """NLO O(e³) finite-T QED interaction pressure δP_{e³} [MeV⁴], which the O(α) terms omit.
 
     Port of LINX's ``explicit_P3`` (Bennett et al., arXiv:1911.04504, eq. 4.24):
@@ -477,12 +464,8 @@ def qed_eos_e3_pressure(tplmev, m_e=M_ELECTRON, nodes=None, weights=None):
     cutoff makes δP exactly 0, with zero T-derivatives, once every node is cut (T_pl < m_e/300); the
     autodiff derivatives of qed_eos_e3_deltas would otherwise be NaN below T_pl ≈ 7e-4 MeV.
     """
-    if nodes is None:
-        nodes = _X_DEFAULT
-    if weights is None:
-        weights = _W_DEFAULT
-    x = jnp.asarray(nodes)
-    dx = jnp.asarray(weights)
+    x = _X_DEFAULT
+    dx = _W_DEFAULT
     mt = m_e / tplmev
     exm = jnp.sqrt(x**2 + mt**2)
     in_range = exm <= _FD_CUTOFF                          # exp argument masked against inf/inf
@@ -495,21 +478,16 @@ def qed_eos_e3_pressure(tplmev, m_e=M_ELECTRON, nodes=None, weights=None):
     return jnp.where(pos, e3 / (12.0 * PI**4) * tplmev**4 * jint_pos**1.5, 0.0)
 
 
-def qed_eos_e3_deltas(tplmev, m_e=M_ELECTRON, nodes=None, weights=None):
+def qed_eos_e3_deltas(tplmev, m_e=M_ELECTRON):
     """NLO O(e³) QED corrections (δρ, δP, δ(dρ/dT)) [MeV⁴, MeV⁴, MeV³], additive to the O(α) ones.
 
     δρ = T dP/dT − P and δ(dρ/dT) = T d²P/dT², with the T-derivatives by forward-mode autodiff of
     qed_eos_e3_pressure (so m_e may be traced).
     """
-    if nodes is None:
-        nodes = _X_DEFAULT
-    if weights is None:
-        weights = _W_DEFAULT
-    nodes = jnp.asarray(nodes)
-    weights = jnp.asarray(weights)
+    # CG come back and add N in here
 
     def _P(T):
-        return qed_eos_e3_pressure(T, m_e=m_e, nodes=nodes, weights=weights)
+        return qed_eos_e3_pressure(T, m_e=m_e)
 
     def _dP(T):
         return jax.jvp(_P, (T,), (jnp.ones_like(T),))[1]
@@ -523,7 +501,7 @@ def qed_eos_e3_deltas(tplmev, m_e=M_ELECTRON, nodes=None, weights=None):
     return drho, P, dC
 
 
-def qed_plasma_deltas(tplmev, phie=0.0, nodes=None, weights=None, pdep=True, m_e=M_ELECTRON,
+def qed_plasma_deltas(tplmev, phie=0.0, pdep=True, m_e=M_ELECTRON,
                       nlo=False):
     """Photon + e± QED corrections (δρ, δP, δ(dρ/dT)) [MeV⁴, MeV⁴, MeV³], the RHS's one call.
 
@@ -537,33 +515,33 @@ def qed_plasma_deltas(tplmev, phie=0.0, nodes=None, weights=None, pdep=True, m_e
         Add the NLO O(e³) term (qed_eos_e3_deltas).  False reproduces BURST (O(α) only); the
         solvers default to True, the order of the N_eff = 3.044 literature.
     """
-    d = qed_eos_corrections(tplmev, phie, nodes, weights, m_e=m_e)
+    d = qed_eos_corrections(tplmev, phie, m_e=m_e)
     rho, P, drho = d[0] + d[3], d[1] + d[4], d[2] + d[5]
     if pdep:
-        dp = qed_eos_pdep_corrections(tplmev, phie, nodes, weights, m_e=m_e)
+        dp = qed_eos_pdep_corrections(tplmev, phie, m_e=m_e)
         rho, P, drho = rho + dp[0], P + dp[1], drho + dp[2]
     if nlo:
-        e3 = qed_eos_e3_deltas(tplmev, m_e=m_e, nodes=nodes, weights=weights)
+        e3 = qed_eos_e3_deltas(tplmev, m_e=m_e)
         rho, P, drho = rho + e3[0], P + e3[1], drho + e3[2]
     return rho, P, drho
 
 
-def rho_plasma_qed_delta(tplmev, phie=0.0, nodes=None, weights=None, pdep=True, m_e=M_ELECTRON,
+def rho_plasma_qed_delta(tplmev, phie=0.0, pdep=True, m_e=M_ELECTRON,
                          nlo=False):
     """QED δρ_γ + δρ_e [MeV⁴], to add to rho_plasma; O(α), plus O(e³) with nlo=True."""
-    return qed_plasma_deltas(tplmev, phie, nodes, weights, pdep, m_e=m_e, nlo=nlo)[0]
+    return qed_plasma_deltas(tplmev, phie, pdep, m_e=m_e, nlo=nlo)[0]
 
 
-def pressure_plasma_qed_delta(tplmev, phie=0.0, nodes=None, weights=None, pdep=True,
+def pressure_plasma_qed_delta(tplmev, phie=0.0, pdep=True,
                               m_e=M_ELECTRON, nlo=False):
     """QED δP_γ + δP_e [MeV⁴], to add to pressure_plasma; O(α), plus O(e³) with nlo=True."""
-    return qed_plasma_deltas(tplmev, phie, nodes, weights, pdep, m_e=m_e, nlo=nlo)[1]
+    return qed_plasma_deltas(tplmev, phie, pdep, m_e=m_e, nlo=nlo)[1]
 
 
-def drho_plasma_dT_qed_delta(tplmev, phie=0.0, nodes=None, weights=None, pdep=True,
+def drho_plasma_dT_qed_delta(tplmev, phie=0.0, pdep=True,
                              m_e=M_ELECTRON, nlo=False):
     """QED δ(dρ_γ/dT) + δ(dρ_e/dT) [MeV³], to add to drho_plasma_dT; O(α), + O(e³) if nlo."""
-    return qed_plasma_deltas(tplmev, phie, nodes, weights, pdep, m_e=m_e, nlo=nlo)[2]
+    return qed_plasma_deltas(tplmev, phie, pdep, m_e=m_e, nlo=nlo)[2]
 
 
 # ==== the decoupling background clock =============================================================
