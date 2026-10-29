@@ -18,7 +18,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 
-from .constants import ALPHA_FS, HBAR, M_ELECTRON, MPL, PI, ZETA3, _FD_CUTOFF, _EXP_MAX
+from .constants import ALPHA_FS, HBAR, M_ELECTRON, MPL, PI, ZETA3, _FD_CUTOFF, _EXP_MAX, ETA0_DEFAULT, N_GAMMA, _N_NU_DEFAULT
 from .grid import gauss_laguerre_plain, legendre_canonical
 
 
@@ -34,13 +34,6 @@ def pressure_gamma(T):
     return rho_gamma(T) / 3.0
 
 
-# n_γ = N_GAMMA·T³ (g = 2).
-N_GAMMA = 2.0 * ZETA3 / PI**2
-
-# Present baryon-to-photon ratio n_b/n_γ, LINX's const.eta0 (Ω_b h² = 0.02242); the coupled LINX
-# solve passes its own value.
-ETA0_DEFAULT = 6.0913e-10
-
 # (T_γ/T_cm)³ today for instantaneous e± annihilation: carries η0 (quoted at today's photon
 # temperature) onto the comoving T_cm.  The true ratio differs by ~0.2%, irrelevant for φ_e.
 _ELEVEN_OVER_FOUR = 11.0 / 4.0
@@ -51,13 +44,11 @@ def nb_over_Tcm3(eta0):
     return eta0 * N_GAMMA * _ELEVEN_OVER_FOUR
 
 
-_SEVEN_EIGHTHS = 7.0 / 8.0
-_N_NU_DEFAULT = 3.0  # thermally populated flavours (ν + ν̄ each)
 
 
 def rho_nu(T_nu, n_nu=_N_NU_DEFAULT):
     """Massless thermal neutrino energy density n_nu·(7/8)(π²/15)T_ν⁴ [MeV⁴]."""
-    return n_nu * _SEVEN_EIGHTHS * PI**2 / 15.0 * T_nu**4
+    return n_nu * 7.0 / 8.0 * PI**2 / 15.0 * T_nu**4
 
 
 def hubble(rho_tot):
