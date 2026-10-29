@@ -175,9 +175,6 @@ class Thermo(eqx.Module):
         """dρ_plasma/dT [MeV³] at fixed φ, by autodiff of the quadrature (no dφ/dT feedback)."""
         return jax.grad(lambda t: self.rho_plasma(t, phi, m))(T)
 
-    def drho_plasma_dT_autodiff(self, T):
-        """Autodiff of the quadrature at φ = 0: the cross-check for drho_plasma_dT."""
-        return jax.grad(lambda t: self.rho_plasma(t, 0.0))(T)
 
     # ---- charge-neutral electron degeneracy φ_e --------------------------------------------------
 
@@ -239,15 +236,6 @@ class Thermo(eqx.Module):
             phi = phi - f / fp
         return jnp.where(slope0 > 0.0, phi, jnp.nan)   # NaN past the validity limit: fail loudly
 
-    def phie_linear(self, tplmev, tcmpl, eta0, q_baryon=0.5, m_e=M_ELECTRON):
-        """BURST's linearized charge-neutrality φ_e = target/(∂net/∂φ at φ = 0), for validation.
-
-        Equals solve_phie to machine precision at high T (φ_e ~ 1e-9).
-        """
-        mt = m_e / tplmev
-        target = q_baryon * self.nb_tcm3(eta0) * tcmpl**3
-        return target / self._dnet_dphi_over_T3(0.0, mt)
-
     # ---- finite-T QED mass renormalization (δm_e², δm_γ²) ----------------------------------------
 
     def get_eg_mass_renorm(self, tplmev, phie, m_e=M_ELECTRON):
@@ -298,14 +286,6 @@ class Thermo(eqx.Module):
     def delta_mg2(self, tplmev, phie=0.0, m_e=M_ELECTRON):
         """Photon thermal mass² δm_γ² [MeV²] = dmgeps2·T_pl²."""
         return self.get_eg_mass_renorm(tplmev, phie, m_e=m_e)[3] * tplmev**2
-
-    def m_e_eff(self, tplmev, phie=0.0, m_e=M_ELECTRON):
-        """Thermal effective electron mass √(m_e² + δm_e²) [MeV].
-
-        Not used by the solvers: the EoS and the lepton kernels take the bare mass, and finite-T QED
-        enters the EoS additively.
-        """
-        return jnp.sqrt(m_e**2 + self.delta_me2(tplmev, phie, m_e=m_e))
 
     # ---- momentum-dependent electron self-energy (BURST's second thermo loop) --------------------
 
@@ -524,18 +504,6 @@ class Thermo(eqx.Module):
             rho, P, drho = rho + e3[0], P + e3[1], drho + e3[2]
         return rho, P, drho
 
-    def rho_plasma_qed_delta(self, tplmev, phie=0.0, pdep=True, m_e=M_ELECTRON, nlo=False):
-        """QED δρ_γ + δρ_e [MeV⁴], to add to rho_plasma; O(α), plus O(e³) with nlo=True."""
-        return self.qed_plasma_deltas(tplmev, phie, pdep, m_e=m_e, nlo=nlo)[0]
-
-    def pressure_plasma_qed_delta(self, tplmev, phie=0.0, pdep=True, m_e=M_ELECTRON, nlo=False):
-        """QED δP_γ + δP_e [MeV⁴], to add to pressure_plasma; O(α), plus O(e³) with nlo=True."""
-        return self.qed_plasma_deltas(tplmev, phie, pdep, m_e=m_e, nlo=nlo)[1]
-
-    def drho_plasma_dT_qed_delta(self, tplmev, phie=0.0, pdep=True, m_e=M_ELECTRON, nlo=False):
-        """QED δ(dρ_γ/dT) + δ(dρ_e/dT) [MeV³], to add to drho_plasma_dT; O(α), + O(e³) if nlo."""
-        return self.qed_plasma_deltas(tplmev, phie, pdep, m_e=m_e, nlo=nlo)[2]
-
     # ---- the decoupling background clock ---------------------------------------------------------
 
     def _rhs(self, lna, T, args):
@@ -545,45 +513,3 @@ class Thermo(eqx.Module):
         drhodT = self.drho_plasma_dT(T)
         return -3.0 * (rho + P) / drhodT
 
-    def evolve_background(self, T_init=100.0, lna_max=10.0, n_save=256, rtol=1e-10, atol=1e-12):
-        """Instantaneous-decoupling reference: T_pl over ln a ∈ [0, lna_max] (free gas, no ν heating).
-
-        T_init [MeV] defaults to 100 so e± start fully relativistic; lna_max = 10 ends at T_ν ≈ 5 keV.
-        Returns a dict of lna, T_pl, T_nu = T_init·e^{−ln a}, ratio = T_pl/T_nu (each ``n_save`` long),
-        ratio_final and neff_final.
-        """
-        term = diffrax.ODETerm(self._rhs)
-        saveat = diffrax.SaveAt(ts=jnp.linspace(0.0, lna_max, n_save))
-        controller = diffrax.PIDController(rtol=rtol, atol=atol)
-        sol = diffrax.diffeqsolve(
-            term,
-            diffrax.Tsit5(),
-            t0=0.0,
-            t1=lna_max,
-            dt0=1e-3,
-            y0=jnp.asarray(T_init, dtype=jnp.float64),
-            saveat=saveat,
-            stepsize_controller=controller,
-            max_steps=100_000,
-        )
-        lna = sol.ts
-        T_pl = sol.ys
-        T_nu = T_init * jnp.exp(-lna)
-        return {
-            "lna": lna,
-            "T_pl": T_pl,
-            "T_nu": T_nu,
-            "ratio": T_pl / T_nu,
-            "neff_final": neff(T_nu[-1], T_pl[-1]),
-            "ratio_final": T_pl[-1] / T_nu[-1],
-        }
-
-    def comoving_plasma_entropy(self, T_pl, lna):
-        """Comoving plasma entropy s_pl·a³ = (ρ_pl + P_pl)/T_pl·e^{3 ln a} at φ = 0.
-
-        T_pl, lna: scalars or a trajectory.  Constant along evolve_background's solution.
-        """
-        rho = jax.vmap(lambda t: self.rho_plasma(t, 0.0))(jnp.atleast_1d(T_pl))
-        P = jax.vmap(lambda t: self.pressure_plasma(t, 0.0))(jnp.atleast_1d(T_pl))
-        s = (rho + P) / jnp.atleast_1d(T_pl)
-        return jnp.reshape(s * jnp.exp(3.0 * jnp.atleast_1d(lna)), jnp.shape(T_pl))
