@@ -17,9 +17,10 @@ import jax
 import jax.numpy as jnp
 import optimistix as optx
 
-from . import compiling, thermo
+from . import compiling
 from .constants import M_ELECTRON, PI
 from .grid import make_eps_grid
+from .thermo import ETA0_DEFAULT, Thermo, hubble, rho_gamma
 from .transport import assemble as A
 from .transport.nunu import build_nunu_kernel
 from .transport.nunubar import build_nunubar_kernel
@@ -60,10 +61,10 @@ def rho_nu_from_spectrum(grid, occ, T_cm):
 
 def neff_from_spectrum(grid, occ, T_cm, T_pl):
     """N_eff = (8/7)(11/4)^{4/3} ρ_ν/ρ_γ (valid once e± annihilation is complete)."""
-    return _8_7 * _11_4_43 * rho_nu_from_spectrum(grid, occ, T_cm) / thermo.rho_gamma(T_pl)
+    return _8_7 * _11_4_43 * rho_nu_from_spectrum(grid, occ, T_cm) / rho_gamma(T_pl)
 
 
-def _plasma_eos(T_pl, phie, use_renorm, renorm_pdep, phie_static_zero, me=M_ELECTRON,
+def _plasma_eos(T_pl, phie, use_renorm, renorm_pdep, phie_static_zero, thermo, me=M_ELECTRON,
                 qed_nlo=True):
     """(ρ_pl, P_pl, C = dρ_pl/dT) of the e±/γ plasma, plus the finite-T QED δρ/δP/δC if use_renorm."""
     rho_pl = thermo.rho_plasma(T_pl, phie, me)
@@ -79,22 +80,22 @@ def _plasma_eos(T_pl, phie, use_renorm, renorm_pdep, phie_static_zero, me=M_ELEC
     return rho_pl, P_pl, C
 
 
-def _phie_fn(phie, eta0, q_baryon, me):
+def _phie_fn(phie, eta0, q_baryon, me, thermo):
     """φ_e(T_pl, T_cm): the fixed float ``phie``, or charge neutrality for ``phie="auto"``."""
     if isinstance(phie, str) and phie == "auto":
-        _eta0 = thermo.ETA0_DEFAULT if eta0 is None else eta0
+        _eta0 = ETA0_DEFAULT if eta0 is None else eta0
         return lambda T_pl, T_cm: thermo.solve_phie(T_pl, T_cm / T_pl, _eta0, q_baryon, m_e=me)
     return lambda T_pl, T_cm: phie
 
 
 def _background(grid, occ, T_pl, T_cm, phie, drhonudt, use_renorm, renorm_pdep, phie_static_zero,
-                me, qed_nlo, delta_neff_init):
+                me, qed_nlo, delta_neff_init, thermo):
     """H and dT_pl/dln a from the plasma EoS, ρ_ν, the inert dark radiation and ρ̇_ν."""
-    rho_pl, P_pl, C = _plasma_eos(T_pl, phie, use_renorm, renorm_pdep, phie_static_zero,
+    rho_pl, P_pl, C = _plasma_eos(T_pl, phie, use_renorm, renorm_pdep, phie_static_zero, thermo,
                                   me=me, qed_nlo=qed_nlo)
     rho_nu = rho_nu_from_spectrum(grid, occ, T_cm)
     rho_dr = delta_neff_init * _DR_DNEFF_FACTOR * (7.0 / 8.0) * (PI**2 / 15.0) * T_cm**4
-    H = thermo.hubble(rho_pl + rho_nu + rho_dr)
+    H = hubble(rho_pl + rho_nu + rho_dr)
     dT_pl = (-3.0 * (rho_pl + P_pl) - drhonudt / H) / C
     return H, dT_pl
 
@@ -102,7 +103,7 @@ def _background(grid, occ, T_pl, T_cm, phie, drhonudt, use_renorm, renorm_pdep, 
 def make_rhs(grid, prec_trans, nunu_kernel, nunubar_kernel, T_cm_init,
              nuratiotol=A.NURATIOTOL, use_renorm=True, use_sched=False, renorm_pdep=True,
              qed_nlo=True, tcm_cutoff=0.015, phie=0.0, eta0=None, q_baryon=0.5,
-             delta_neff_init=0.0, me=M_ELECTRON, lag_tail_fix=True):
+             delta_neff_init=0.0, me=M_ELECTRON, lag_tail_fix=True, thermo=None):
     """The vector field ``rhs(lna, state, args) -> {'T_pl': dT_pl, 'f': df}`` per d(ln a).
 
     Parameters
@@ -133,8 +134,12 @@ def make_rhs(grid, prec_trans, nunu_kernel, nunubar_kernel, T_cm_init,
     lag_tail_fix : bool
         Use the Gauss–Laguerre tail rule on the wide-regime nuer1/nuer2/nuepma bins, where BURST's
         Legendre segment spans a near-infinite interval (False = bit-faithful to BURST).
+    thermo : Thermo
+        The plasma model (default ``Thermo()``).
     """
-    phie_at = _phie_fn(phie, eta0, q_baryon, me)
+    if thermo is None:
+        thermo = Thermo()
+    phie_at = _phie_fn(phie, eta0, q_baryon, me, thermo)
     phie_static_zero = isinstance(phie, (int, float)) and phie == 0.0
 
     def rhs(lna, state, args):
@@ -150,7 +155,7 @@ def make_rhs(grid, prec_trans, nunu_kernel, nunubar_kernel, T_cm_init,
             dfdt = jnp.where(active, dfdt, 0.0)
             drhonudt = jnp.where(active, drhonudt, 0.0)
         H, dT_pl = _background(grid, occ, T_pl, T_cm, phie_use, drhonudt, use_renorm, renorm_pdep,
-                               phie_static_zero, me, qed_nlo, delta_neff_init)
+                               phie_static_zero, me, qed_nlo, delta_neff_init, thermo)
         return {"T_pl": dT_pl, "f": dfdt / H}
 
     return rhs
@@ -161,7 +166,7 @@ def make_split_rates(grid, prec_trans, nunu_kernel, nunubar_kernel, T_cm_init,
                      renorm_pdep=True, qed_nlo=True, tcm_cutoff=0.015, phie=0.0,
                      eta0=None, q_baryon=0.5, delta_neff_init=0.0,
                      me=M_ELECTRON, fd_cap_logC=float("inf"), lag_tail_fix=True,
-                     fd_decay=False, monotone_read=False):
+                     fd_decay=False, monotone_read=False, thermo=None):
     """:func:`make_rhs` in affine form, for the exponential-midpoint step.
 
     Returns ``split(lna, T_pl, occ) -> (A, B, dT_pl, H)`` with df/dln a = A − B·f (A, B per d(ln a),
@@ -169,7 +174,9 @@ def make_split_rates(grid, prec_trans, nunu_kernel, nunubar_kernel, T_cm_init,
     the off-grid tail closures of the lepton kernels (``fd_cap_logC``, ``fd_decay``,
     ``monotone_read``; see ``interp``), which the QKE solver uses.
     """
-    phie_at = _phie_fn(phie, eta0, q_baryon, me)
+    if thermo is None:
+        thermo = Thermo()
+    phie_at = _phie_fn(phie, eta0, q_baryon, me, thermo)
     phie_static_zero = isinstance(phie, (int, float)) and phie == 0.0
 
     def split(lna, T_pl, occ):
@@ -187,7 +194,7 @@ def make_split_rates(grid, prec_trans, nunu_kernel, nunubar_kernel, T_cm_init,
             b_s = jnp.where(active, b_s, 0.0)
             drhonudt = jnp.where(active, drhonudt, 0.0)
         H, dT_pl = _background(grid, occ, T_pl, T_cm, phie_use, drhonudt, use_renorm, renorm_pdep,
-                               phie_static_zero, me, qed_nlo, delta_neff_init)
+                               phie_static_zero, me, qed_nlo, delta_neff_init, thermo)
         return a_s / H, b_s / H, dT_pl, H
 
     return split
@@ -198,7 +205,7 @@ def make_decoupling_solver(grid=None, *, n_save=64, max_steps=50_000,
                            nuratiotol=A.NURATIOTOL, use_renorm=True, use_sched=True,
                            renorm_pdep=True, qed_nlo=True, tcm_cutoff=0.015, phie=0.0, eta0=None,
                            q_baryon=0.5, xi=(0.0, 0.0, 0.0), sumrules=False, throw=True,
-                           lag_tail_fix=True):
+                           lag_tail_fix=True, thermo=None):
     """The reference transport solve: one adaptive diffrax solve over the whole window.
 
     The kernels, the noise floor and the equilibrium initial condition are built here, once; the
@@ -208,6 +215,8 @@ def make_decoupling_solver(grid=None, *, n_save=64, max_steps=50_000,
     -----------------------
     grid : EpsGrid, optional
         The ε-grid (default ``make_eps_grid()``).
+    thermo : Thermo, optional
+        The plasma model (default ``Thermo()``).
     n_save : int
         Saved states, uniform in ln a.
     max_steps, pcoeff, icoeff, dcoeff
@@ -246,6 +255,8 @@ def make_decoupling_solver(grid=None, *, n_save=64, max_steps=50_000,
     """
     if grid is None:
         grid = make_eps_grid()
+    if thermo is None:
+        thermo = Thermo()
     dtmax_default = 0.08 if use_sched else 0.15
     if solver is None:
         solver = diffrax.Kvaerno5() if implicit else diffrax.Tsit5()
@@ -276,7 +287,8 @@ def make_decoupling_solver(grid=None, *, n_save=64, max_steps=50_000,
         rhs = make_rhs(grid, prec_use, nunu_kernel, nunubar_kernel, T_init, nuratiotol, use_renorm,
                        use_sched=use_sched, renorm_pdep=renorm_pdep, qed_nlo=qed_nlo,
                        tcm_cutoff=tcm_cutoff, phie=phie, eta0=eta0, q_baryon=q_baryon,
-                       delta_neff_init=delta_neff_init, me=me, lag_tail_fix=lag_tail_fix)
+                       delta_neff_init=delta_neff_init, me=me, lag_tail_fix=lag_tail_fix,
+                       thermo=thermo)
         sol = diffrax.diffeqsolve(
             diffrax.ODETerm(rhs), solver, t0=0.0, t1=lna_max, dt0=1e-4,
             y0={"T_pl": T_init, "f": occ_use},
@@ -302,7 +314,7 @@ def make_decoupling_solver(grid=None, *, n_save=64, max_steps=50_000,
             "sol": sol,
         }
         if sumrules:
-            phie_at = _phie_fn(phie, eta0, q_baryon, me)
+            phie_at = _phie_fn(phie, eta0, q_baryon, me, thermo)
 
             def _sr_one(tc, tp, occ):
                 return A.compute_sumrules(grid, occ, tc, tp, phie_at(tp, tc), prec_use,

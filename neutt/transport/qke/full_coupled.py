@@ -28,7 +28,7 @@ import numpy as np
 from ...constants import M_ELECTRON, PI, SIN2THW   # noqa: F401  (PI: pinned ν–ν code)
 from ...grid import EpsGrid, make_eps_grid       # noqa: F401  (EpsGrid: pinned ν–ν code)
 from ...interp import FD_ENVELOPE_C
-from ... import thermo
+from ...thermo import ETA0_DEFAULT, Thermo, nb_over_Tcm3
 from .. import assemble as A
 from ..nunu import build_nunu_kernel
 from ..nunubar import build_nunubar_kernel
@@ -228,7 +228,7 @@ from ... import compiling
 #     Cap of the substep schedule (default 1024).
 
 
-def make_full_coupled_solver(grid=None, *, mixing=True, include_matter=False,
+def make_full_coupled_solver(grid=None, *, thermo=None, mixing=True, include_matter=False,
                              include_matter_asym=False, use_renorm=True,
                              renorm_pdep=True, qed_nlo=True, use_sched="union", tcm_cutoff=0.015,
                              n_steps=6000,
@@ -358,6 +358,8 @@ def make_full_coupled_solver(grid=None, *, mixing=True, include_matter=False,
 
     if grid is None:
         grid = make_eps_grid()
+    if thermo is None:
+        thermo = Thermo()
     eps = grid.abscissas
     w = grid.weights                       # noqa: F841  (the pinned ν–ν moments use it)
     N = eps.shape[0]
@@ -406,7 +408,7 @@ def make_full_coupled_solver(grid=None, *, mixing=True, include_matter=False,
     #     return x if P_op is None else jnp.maximum(_prolong1(x), 0.0)
     # φ_e at the live state: charge neutrality for phie="auto", else the float as given
     phie_auto = isinstance(phie, str) and phie == "auto"
-    _eta0 = thermo.ETA0_DEFAULT if eta0 is None else eta0
+    _eta0 = ETA0_DEFAULT if eta0 is None else eta0
 
     def _phie_at(T_pl, T_cm, me):
         return (thermo.solve_phie(T_pl, T_cm / T_pl, _eta0, q_baryon, m_e=me)
@@ -484,7 +486,7 @@ def make_full_coupled_solver(grid=None, *, mixing=True, include_matter=False,
     frame_idx = jnp.arange(0, n_steps, stride)
 
     # asymmetric MSW: n_p = q_baryon·nb_coeff·T_cm³ [MeV³], the baryon charge the e± gas balances
-    nb_coeff = thermo.nb_over_Tcm3(_eta0)
+    nb_coeff = nb_over_Tcm3(_eta0)
 
     def _hamiltonian(T_cm, T_pl, me, sia=z33, sis=z33, asym_scale=1.0):
         """Coherent H (2,N,3,3) [s⁻¹]: vacuum [+ thermal MSW] [+ asymmetric MSW]; ν–ν terms zero."""
@@ -541,7 +543,7 @@ def make_full_coupled_solver(grid=None, *, mixing=True, include_matter=False,
                                    renorm_pdep=renorm_pdep, qed_nlo=qed_nlo, tcm_cutoff=tcm_cutoff,
                                    phie=phie, eta0=eta0, q_baryon=q_baryon,
                                    delta_neff_init=delta_neff_init, me=me, fd_cap_logC=fd_cap_logC,
-                                   fd_decay=fd_decay, monotone_read=monotone_read)
+                                   fd_decay=fd_decay, monotone_read=monotone_read, thermo=thermo)
         dlna = lna_max / n_steps
 
         rho0 = na.rho_from_offdiag(jnp.zeros((2, N, 6), dtype=jnp.complex128),

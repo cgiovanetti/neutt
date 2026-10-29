@@ -22,6 +22,7 @@ import jax.numpy as jnp
 from . import compiling
 from .constants import M_ELECTRON
 from .decoupling import make_rhs, make_split_rates, nanrobust_rms_norm, neff_from_spectrum
+from .thermo import Thermo
 from .grid import make_eps_grid
 from .transport import assemble as A
 from .transport.nunu import build_nunu_kernel
@@ -57,7 +58,7 @@ def head_edges(lna_sw, n_head, power=1.0):
     return lna_sw * (1.0 - (1.0 - i) ** power)
 
 
-def make_hybrid_solver(grid=None, *, lna_sw=1.5, n_head=1600, head_power=1.0,
+def make_hybrid_solver(grid=None, *, thermo=None, lna_sw=1.5, n_head=1600, head_power=1.0,
                        n_save_head=128, n_save_tail=128,
                        use_sched=True, use_renorm=True, renorm_pdep=True, qed_nlo=True,
                        nuratiotol=None, tcm_cutoff=0.015, phie=0.0, eta0=None, q_baryon=0.5,
@@ -94,6 +95,8 @@ def make_hybrid_solver(grid=None, *, lna_sw=1.5, n_head=1600, head_power=1.0,
     """
     if grid is None:
         grid = make_eps_grid()
+    if thermo is None:
+        thermo = Thermo()
     if nuratiotol is None:
         nuratiotol = A.NURATIOTOL
 
@@ -138,7 +141,8 @@ def make_hybrid_solver(grid=None, *, lna_sw=1.5, n_head=1600, head_power=1.0,
                                  nuratiotol, use_renorm, use_sched=use_sched,
                                  renorm_pdep=renorm_pdep, qed_nlo=qed_nlo, tcm_cutoff=tcm_cutoff,
                                  phie=phie, eta0=eta0, q_baryon=q_baryon,
-                                 delta_neff_init=delta_neff_init, me=me, lag_tail_fix=lag_tail_fix)
+                                 delta_neff_init=delta_neff_init, me=me, lag_tail_fix=lag_tail_fix,
+                                 thermo=thermo)
 
         # ---- expMid head: fixed graded steps over [0, lna_sw] ----
         def body(carry, x):
@@ -178,7 +182,7 @@ def make_hybrid_solver(grid=None, *, lna_sw=1.5, n_head=1600, head_power=1.0,
                        nuratiotol, use_renorm, use_sched=use_sched,
                        renorm_pdep=renorm_pdep, qed_nlo=qed_nlo, tcm_cutoff=tcm_cutoff,
                        phie=phie, eta0=eta0, q_baryon=q_baryon, delta_neff_init=delta_neff_init, me=me,
-                       lag_tail_fix=lag_tail_fix)
+                       lag_tail_fix=lag_tail_fix, thermo=thermo)
         sol = diffrax.diffeqsolve(
             diffrax.ODETerm(rhs), diffrax.Tsit5(), t0=t0, t1=lna_max, dt0=dt0, y0=y0,
             saveat=diffrax.SaveAt(ts=ts_tail),
