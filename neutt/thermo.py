@@ -22,7 +22,7 @@ from .grid import gauss_laguerre_plain, legendre_canonical
 
 # BURST's 25-node Gauss–Laguerre rule for integrals of the form \int_0^\infty e^{-x}f(x) dx.  Appears 
 # in e φ_e and QED integrals.  Occupation cutoff hardcoded at E/T = 300.
-_N_DEFAULT = 25
+_N_DEFAULT = 80
 _X_DEFAULT, _W_DEFAULT = gauss_laguerre_plain(_N_DEFAULT) # calls scipy; fine, since grids are set up outside jit
 
 

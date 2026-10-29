@@ -33,3 +33,5 @@ BR_END = 14.0 / 45.0
 
 # Occupation cutoff hardcoded at E/T = 300.
 _FD_CUTOFF = 300.0
+
+_EXP_MAX = 709.0   # largest exp argument kept when building distributions (exp(709.8) overflows float64)
