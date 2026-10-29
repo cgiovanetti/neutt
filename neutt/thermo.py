@@ -468,7 +468,8 @@ class Thermo(eqx.Module):
         """
         Electron degeneracy phi_e = mu_e/T_pl from charge neutrality with the baryons.
 
-        Solves n_e- - n_e+ = q_baryon n_b by Newton iteration from an asinh seed.
+        Solves n_e- - n_e+ = q_baryon n_b by Newton iteration from an asinh seed; derivatives
+        are taken through the root by the implicit function theorem.
 
         Parameters
         ----------
@@ -494,14 +495,18 @@ class Thermo(eqx.Module):
         mt = m_e / tplmev
         target = q_baryon * self.nb_tcm3(eta0) * tcmpl**3        # (n_{e⁻}−n_{e⁺})/T_pl³ required
 
-        # seed: net ≈ slope(0)·sinh φ for φ ≪ 1
-        slope0 = self._dnet_dphi_over_T3(0.0, mt)
-        phi = jnp.arcsinh(target / slope0)
+        def residual(phi):
+            return self.net_electron_number_over_T3(phi, mt) - target
 
-        for _ in range(n_newton):
-            f = self.net_electron_number_over_T3(phi, mt) - target
-            fp = self._dnet_dphi_over_T3(phi, mt)
-            phi = phi - f / fp
+        def newton(f, phi):
+            for _ in range(n_newton):
+                phi = phi - f(phi) / self._dnet_dphi_over_T3(phi, mt)
+            return phi
+
+        # seed: net ≈ slope(0)·sinh φ for φ ≪ 1; derivatives go through the root implicitly
+        slope0 = self._dnet_dphi_over_T3(0.0, mt)
+        phi0 = jnp.arcsinh(target / slope0)
+        phi = jax.lax.custom_root(residual, phi0, newton, lambda g, y: y / g(1.0))
         return jnp.where(slope0 > 0.0, phi, jnp.nan)   # NaN past the validity limit: fail loudly
 
     # ---- finite-T QED mass renormalization (δm_e², δm_γ²) ----------------------------------------

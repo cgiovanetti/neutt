@@ -3,9 +3,11 @@
 State ``{'T_pl': scalar [MeV], 'f': (3, 2, N)}``; T_cm = T_init·e^{−ln a} (comoving momenta are
 frozen).  The temperature equation and the collision RHS are BURST's:
 
-    dT_pl/dln a = [−3(ρ_pl + P_pl) − ρ̇_ν/H] / (dρ_pl/dT),     df/dln a = C[f]/H,
+    dT_pl/dln a = [−3(ρ_pl + P_pl) − ρ̇_ν/H − ∂ρ_pl/∂ln a|_{T_pl}] / (∂ρ_pl/∂T_pl|_{T_cm}),
+    df/dln a = C[f]/H,
 
-with H = H(ρ_pl + ρ_ν + ρ_DR).  ``make_rhs`` gives the vector field for an adaptive solve,
+with H = H(ρ_pl + ρ_ν + ρ_DR); for ``phie="auto"`` both plasma derivatives go through the
+charge-neutral φ_e(T_pl, T_cm).  ``make_rhs`` gives the vector field for an adaptive solve,
 ``make_split_rates`` the same physics in affine form A − B·f for the exponential-midpoint step, and
 ``make_decoupling_solver`` the reference adaptive solve.
 """
@@ -64,20 +66,30 @@ def neff_from_spectrum(grid, occ, T_cm, T_pl):
     return _8_7 * _11_4_43 * rho_nu_from_spectrum(grid, occ, T_cm) / rho_gamma(T_pl)
 
 
-def _plasma_eos(T_pl, phie, use_renorm, renorm_pdep, phie_static_zero, thermo, me=M_ELECTRON,
-                qed_nlo=True):
-    """(ρ_pl, P_pl, C = dρ_pl/dT) of the e±/γ plasma, plus the finite-T QED δρ/δP/δC if use_renorm."""
+def _plasma_eos(T_pl, T_cm, phie_at, use_renorm, renorm_pdep, phie_static_zero, thermo,
+                me=M_ELECTRON, qed_nlo=True):
+    """(ρ_pl, P_pl, C, S) of the e±/γ plasma with φ_e = phie_at(T_pl, T_cm) differentiated through:
+    C = ∂ρ_pl/∂T_pl at fixed T_cm and S = ∂ρ_pl/∂ln a at fixed T_pl (the dilution of the net
+    electrons, n_b ∝ T_cm³), plus the finite-T QED δρ/δP/δC at fixed φ_e if use_renorm."""
+    phie = phie_at(T_pl, T_cm)
     rho_pl = thermo.rho_plasma(T_pl, phie, me)
     P_pl = thermo.pressure_plasma(T_pl, phie, me)
-    C = (thermo.drho_plasma_dT(T_pl, me) if phie_static_zero
-         else thermo.drho_plasma_dT_phi(T_pl, phie, me))
+    if phie_static_zero:
+        C = thermo.drho_plasma_dT(T_pl, me)
+        S = 0.0
+    else:
+        def rho_free(T, Tcm):
+            return thermo.rho_plasma(T, phie_at(T, Tcm), me)
+
+        C, drho_dTcm = jax.grad(rho_free, (0, 1))(T_pl, T_cm)
+        S = -T_cm * drho_dTcm
     if use_renorm:
         drho_q, dP_q, dC_q = thermo.qed_plasma_deltas(T_pl, phie, pdep=renorm_pdep, m_e=me,
                                                        nlo=qed_nlo)
         rho_pl = rho_pl + drho_q
         P_pl = P_pl + dP_q
         C = C + dC_q
-    return rho_pl, P_pl, C
+    return rho_pl, P_pl, C, S
 
 
 def _phie_fn(phie, eta0, q_baryon, me, thermo):
@@ -88,15 +100,15 @@ def _phie_fn(phie, eta0, q_baryon, me, thermo):
     return lambda T_pl, T_cm: phie
 
 
-def _background(grid, occ, T_pl, T_cm, phie, drhonudt, use_renorm, renorm_pdep, phie_static_zero,
-                me, qed_nlo, delta_neff_init, thermo):
+def _background(grid, occ, T_pl, T_cm, phie_at, drhonudt, use_renorm, renorm_pdep,
+                phie_static_zero, me, qed_nlo, delta_neff_init, thermo):
     """H and dT_pl/dln a from the plasma EoS, ρ_ν, the inert dark radiation and ρ̇_ν."""
-    rho_pl, P_pl, C = _plasma_eos(T_pl, phie, use_renorm, renorm_pdep, phie_static_zero, thermo,
-                                  me=me, qed_nlo=qed_nlo)
+    rho_pl, P_pl, C, S = _plasma_eos(T_pl, T_cm, phie_at, use_renorm, renorm_pdep,
+                                     phie_static_zero, thermo, me=me, qed_nlo=qed_nlo)
     rho_nu = rho_nu_from_spectrum(grid, occ, T_cm)
     rho_dr = delta_neff_init * _DR_DNEFF_FACTOR * (7.0 / 8.0) * (PI**2 / 15.0) * T_cm**4
     H = hubble(rho_pl + rho_nu + rho_dr)
-    dT_pl = (-3.0 * (rho_pl + P_pl) - drhonudt / H) / C
+    dT_pl = (-3.0 * (rho_pl + P_pl) - drhonudt / H - S) / C
     return H, dT_pl
 
 
@@ -154,7 +166,7 @@ def make_rhs(grid, prec_trans, nunu_kernel, nunubar_kernel, T_cm_init,
             active = T_cm >= tcm_cutoff
             dfdt = jnp.where(active, dfdt, 0.0)
             drhonudt = jnp.where(active, drhonudt, 0.0)
-        H, dT_pl = _background(grid, occ, T_pl, T_cm, phie_use, drhonudt, use_renorm, renorm_pdep,
+        H, dT_pl = _background(grid, occ, T_pl, T_cm, phie_at, drhonudt, use_renorm, renorm_pdep,
                                phie_static_zero, me, qed_nlo, delta_neff_init, thermo)
         return {"T_pl": dT_pl, "f": dfdt / H}
 
@@ -193,7 +205,7 @@ def make_split_rates(grid, prec_trans, nunu_kernel, nunubar_kernel, T_cm_init,
             a_s = jnp.where(active, a_s, 0.0)
             b_s = jnp.where(active, b_s, 0.0)
             drhonudt = jnp.where(active, drhonudt, 0.0)
-        H, dT_pl = _background(grid, occ, T_pl, T_cm, phie_use, drhonudt, use_renorm, renorm_pdep,
+        H, dT_pl = _background(grid, occ, T_pl, T_cm, phie_at, drhonudt, use_renorm, renorm_pdep,
                                phie_static_zero, me, qed_nlo, delta_neff_init, thermo)
         return a_s / H, b_s / H, dT_pl, H
 
