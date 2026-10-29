@@ -241,7 +241,7 @@ def make_decoupling_solver(grid=None, *, n_save=64, max_steps=50_000,
     -------
     (solve, grid)
         ``solve(T_init=10.0, lna_max=7.0, rtol=1e-6, atol=1e-30, dtmax=None, delta_neff_init=0.0,
-        me=None, xi=None, eta0=None)`` → dict with ``lna``, ``T_pl``, ``T_cm``, ``ratio`` and ``f_traj``
+        me=None, xi=None, eta0=None, q_baryon=None)`` → dict with ``lna``, ``T_pl``, ``T_cm``, ``ratio`` and ``f_traj``
         (n_save, 3, 2, N) at the saved states, ``f_final``, ``ratio_final``, ``neff_final``, the
         diffrax solution ``sol``, and ``sumrules`` if requested.
 
@@ -251,14 +251,15 @@ def make_decoupling_solver(grid=None, *, n_save=64, max_steps=50_000,
         tail bins uncontrolled; ``dtmax`` the step cap (None: 0.08 with the scheduled kernels, 0.15
         otherwise); ``delta_neff_init`` the inert dark radiation; ``me`` the electron mass (None is
         M_ELECTRON as a compile-time constant); ``xi`` a per-call degeneracy (None keeps the baked
-        floor and initial spectrum); ``eta0`` the present baryon-to-photon ratio for
-        ``phie="auto"`` (None: the build-time value).
+        floor and initial spectrum); ``eta0`` and ``q_baryon`` the present baryon-to-photon ratio
+        and net charge per baryon for ``phie="auto"`` (None: the build-time values).
     """
     if grid is None:
         grid = make_eps_grid()
     if thermo is None:
         thermo = Thermo()
     eta0_default = ETA0_DEFAULT if eta0 is None else eta0
+    q_baryon_default = q_baryon
     dtmax_default = 0.08 if use_sched else 0.15
     if solver is None:
         solver = diffrax.Kvaerno5() if implicit else diffrax.Tsit5()
@@ -271,12 +272,14 @@ def make_decoupling_solver(grid=None, *, n_save=64, max_steps=50_000,
 
     @jax.jit
     def solve(T_init=10.0, lna_max=7.0, rtol=1e-6, atol=1e-30, dtmax=None, delta_neff_init=0.0,
-              me=None, xi=None, eta0=None):
+              me=None, xi=None, eta0=None, q_baryon=None):
         compiling()
         if me is None:
             me = M_ELECTRON
         if eta0 is None:
             eta0 = eta0_default
+        if q_baryon is None:
+            q_baryon = q_baryon_default
         if dtmax is None:
             dtmax = dtmax_default
         T_init = jnp.asarray(T_init, dtype=jnp.float64)

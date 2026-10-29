@@ -86,18 +86,20 @@ def make_hybrid_solver(grid=None, *, thermo=None, lna_sw=1.5, n_head=1600, head_
     -------
     (solve, grid)
         ``solve(T_init=10.0, lna_max=7.5, rtol=1e-6, atol=1e-30, dtmax=0.08, delta_neff_init=0.0,
-        qual_tol=1e-4, me=None, xi=None, eta0=None)`` returns the keys of LINX's transport_adapter solver
+        qual_tol=1e-4, me=None, xi=None, eta0=None, q_baryon=None)`` returns the keys of LINX's
+        transport_adapter solver
         (lna, T_pl, T_cm, ratio, f_traj, f_final, ratio_final, neff_final) plus diagnostics:
         ``qualified`` (False: the fallback ran; the result is correct either way), ``qss_dist``
         (max|f − A/B| at the handoff), the head_* sanity checks and tail_steps/tail_rejected/
-        tail_ok.  ``me`` [MeV], ``xi`` and ``eta0`` may be passed per call as traced values (no
-        recompile across values); None means the bare mass and the build-time ``xi``/``eta0``.
+        tail_ok.  ``me`` [MeV], ``xi``, ``eta0`` and ``q_baryon`` may be passed per call as traced
+        values (no recompile across values); None means the bare mass and the build-time values.
     """
     if grid is None:
         grid = make_eps_grid()
     if thermo is None:
         thermo = Thermo()
     eta0_default = ETA0_DEFAULT if eta0 is None else eta0
+    q_baryon_default = q_baryon
     if nuratiotol is None:
         nuratiotol = A.NURATIOTOL
 
@@ -123,7 +125,7 @@ def make_hybrid_solver(grid=None, *, thermo=None, lna_sw=1.5, n_head=1600, head_
 
     @jax.jit
     def solve(T_init=10.0, lna_max=7.5, rtol=1e-6, atol=1e-30, dtmax=0.08,
-              delta_neff_init=0.0, qual_tol=1e-4, me=None, xi=None, eta0=None):
+              delta_neff_init=0.0, qual_tol=1e-4, me=None, xi=None, eta0=None, q_baryon=None):
         compiling()
         # qual_tol = 1e-4: ~2× the attractor distance at lna_sw = 1.5; rejects handoffs past ~1.7.
         # A passed me reaches the kernels, EoS and QED; it shifts the attractor mildly.
@@ -131,6 +133,8 @@ def make_hybrid_solver(grid=None, *, thermo=None, lna_sw=1.5, n_head=1600, head_
             me = M_ELECTRON
         if eta0 is None:
             eta0 = eta0_default
+        if q_baryon is None:
+            q_baryon = q_baryon_default
         T_init = jnp.asarray(T_init, dtype=jnp.float64)
         # a passed xi recomputes the noise floor and initial state inside the jit
         if xi is None:
