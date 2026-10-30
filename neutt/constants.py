@@ -23,10 +23,24 @@ SIN2_THETA23 = 0.417
 DELTA_M2_21 = 7.53e-17       # [MeV²]
 DELTA_M2_31 = 2.59e-15       # [MeV²]
 
-# --- mathematical constants ---
+# --- mathematical constants --- # CG: definitely pi does not need to be here.  zeta3 might also be accessible elsehwere?
 PI = 3.1415926535897932
 ZETA3 = 1.202056903159594
 
 # composite Boole's rule: interior weights (×h) cycled over panels, end points 14/45
 BR_COEFFS = (64.0 / 45.0, 24.0 / 45.0, 64.0 / 45.0, 28.0 / 45.0)
 BR_END = 14.0 / 45.0
+
+# --- cosmology ---
+# Present baryon-to-photon ratio n_b/n_γ, LINX's const.eta0 (Ω_b h² = 0.02242); the coupled LINX
+# solve passes its own value.
+ETA0_DEFAULT = 6.0913e-10
+N_GAMMA = 2.0 * ZETA3 / PI**2 # n_γ = N_GAMMA·T³ (g = 2).
+K_BOLTZMANN = 8.617333262e-11   # [MeV/K]
+T0CMB = 2.7255 * K_BOLTZMANN    # FIRAS CMB temperature today [MeV]
+_N_NU_DEFAULT = 3.0  # thermally populated flavours (ν + ν̄ each)
+
+# Occupation cutoff hardcoded at E/T = 300.
+_FD_CUTOFF = 300.0
+
+_EXP_MAX = 709.0   # largest exp argument kept when building distributions (exp(709.8) overflows float64)

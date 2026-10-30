@@ -13,10 +13,10 @@ requires-python = ">=3.11"
 # PyPI shows only the Author field, so every author is listed by name alone; the contact address
 # is the maintainer's.
 authors = [
+    { name = "Shasha Arani" },
     { name = "Cara Giovanetti" },
     { name = "Evan Grohs" },
     { name = "George Fuller" },
-    { name = "Shasha Arani" },
 ]
 maintainers = [{ name = "Cara Giovanetti", email = "cgiovanetti@lbl.gov" }]
 keywords = ["cosmology", "neutrino decoupling", "N_eff", "big bang nucleosynthesis", "JAX"]

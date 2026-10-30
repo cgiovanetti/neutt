@@ -1,643 +1,903 @@
-"""Plasma thermodynamics: the e±/γ equation of state, its finite-T QED corrections, the
-charge-neutral electron degeneracy, and the decoupling background clock.
-
-Natural units (MeV, MeV⁴).  ρ_γ = (π²/15)T⁴, P = ρ/3; ρ_{e±} = (g/2π²)∫p²E[f₋+f₊]dp with g = 2,
-E = √(p²+m²), f∓ = 1/(exp((E∓μ)/T)+1), evaluated in x = p/T, φ = μ/T with BURST's plain
-Gauss–Laguerre rules.  The free-gas EoS keeps the bare electron mass; finite-T QED enters as
-BURST's additive δρ/δP/δ(dρ/dT) built from the thermal self-energies δm_e², δm_γ² (folding a mass
-shift into the free gas instead would double-count).  φ_e = μ_e/T_pl is fixed by charge
-neutrality with the baryons, n_{e⁻} − n_{e⁺} = q_baryon·n_b, independently of the ν degeneracy ξ.
-"""
-
-from __future__ import annotations
+# import jax, neutt; from neutt.thermo import Thermo, ETA0_DEFAULT
+# th = Thermo(); f = jax.jit(lambda t: th.qed_plasma_deltas(t, th.solve_phie(t, 1.02, ETA0_DEFAULT), nlo=True))
+# with jax.log_compiles(True): print(f(1.0)); print(f(0.9))
 
 import diffrax
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 
-from .constants import ALPHA_FS, HBAR, M_ELECTRON, MPL, PI, ZETA3
+from .constants import ALPHA_FS, HBAR, M_ELECTRON, MPL, ZETA3, _FD_CUTOFF, _EXP_MAX, ETA0_DEFAULT, N_GAMMA, _N_NU_DEFAULT, T0CMB
 from .grid import gauss_laguerre_plain, legendre_canonical
 
-# BURST's 25-node plain Gauss–Laguerre rule (the φ_e and QED integrals) and its occupation cutoff
-# (zero above E/T = 300, as fd/be_equil_calc).
-_N_DEFAULT = 25
-_X_DEFAULT, _W_DEFAULT = gauss_laguerre_plain(_N_DEFAULT)
-_FD_CUTOFF = 300.0
+
+# ==== closed forms ===============================================================================
+
+def rho_gamma(T):
+    """
+    Photon energy density.
+
+    Parameters
+    ----------
+    T : float or array
+        Photon temperature in MeV.
+
+    Returns
+    -------
+    float or array
+        Units of MeV^4.
+    """
+    return jnp.pi**2 / 15.0 * T**4
 
 
-# ==== free-gas e± and γ =========================================================================
+def pressure_gamma(T):
+    """
+    Photon pressure, rho_gamma/3.
 
-# The free-gas e± integrals use 100 nodes (BURST: 25), converged to ~1e-10.
-_EXP_MAX = 709.0   # largest exp argument kept (exp(709.8) overflows float64)
-_NQ = 100
-_X, _W = gauss_laguerre_plain(_NQ)
+    Parameters
+    ----------
+    T : float or array
+        Photon temperature in MeV.
 
+    Returns
+    -------
+    float or array
+        Units of MeV^4.
+    """
+    return rho_gamma(T) / 3.0
+
+
+def nb_over_Tcm3(eta0, ratio_today):
+    """
+    Comoving baryon number density n_b/T_cm^3.
+
+    Set by today's baryon-to-photon ratio and the ratio of photon to comoving
+    temperature after e+e- annihilation; constant throughout the evolution.
+
+    Parameters
+    ----------
+    eta0 : float
+        Present baryon-to-photon ratio.
+    ratio_today : float
+        T_gamma/T_cm after e+e- annihilation.
+
+    Returns
+    -------
+    float
+        Dimensionless.
+    """
+    n_b0 = eta0 * N_GAMMA * T0CMB**3
+    T_cm0 = T0CMB / ratio_today
+    return n_b0 / T_cm0**3
+
+
+def eta0_from_nb_tcm3(nb_tcm3, ratio_today):
+    """
+    Present baryon-to-photon ratio implied by a comoving baryon density; inverse of
+    ``nb_over_Tcm3``.
+
+    Parameters
+    ----------
+    nb_tcm3 : float
+        Comoving baryon number density n_b/T_cm^3.
+    ratio_today : float
+        T_gamma/T_cm after e+e- annihilation.
+
+    Returns
+    -------
+    float
+        Dimensionless.
+    """
+    return nb_tcm3 / (N_GAMMA * ratio_today**3)
+
+
+def rho_nu(T_nu, n_nu=_N_NU_DEFAULT):
+    """
+    Energy density of massless thermal neutrinos.
+
+    Parameters
+    ----------
+    T_nu : float or array
+        Neutrino temperature in MeV.
+    n_nu : float, optional
+        Number of neutrino species, each with its antineutrino. Default is 3.
+
+    Returns
+    -------
+    float or array
+        Units of MeV^4.
+    """
+    return n_nu * 7.0 / 8.0 * jnp.pi**2 / 15.0 * T_nu**4
+
+
+def hubble(rho_tot):
+    """
+    Hubble rate.
+
+    Parameters
+    ----------
+    rho_tot : float or array
+        Total energy density in MeV^4.
+
+    Returns
+    -------
+    float or array
+        Units of s^-1.
+    """
+    return jnp.sqrt(8.0 * jnp.pi * rho_tot / (3.0 * MPL**2)) / HBAR
+
+
+def neff(T_nu, T_gamma, n_nu=_N_NU_DEFAULT):
+    """
+    Effective number of neutrino species for thermal neutrinos at temperature T_nu.
+
+    Parameters
+    ----------
+    T_nu : float or array
+        Neutrino temperature in MeV.
+    T_gamma : float or array
+        Photon temperature in MeV.
+    n_nu : float, optional
+        Number of neutrino species, each with its antineutrino. Default is 3.
+
+    Returns
+    -------
+    float or array
+    """
+    return (8.0 / 7.0) * (11.0 / 4.0) ** (4.0 / 3.0) * rho_nu(T_nu, n_nu) / rho_gamma(T_gamma)
+
+
+# ==== occupations ================================================================================
 
 def _fd(arg, phi):
-    """Fermi–Dirac occupation 1/(exp(arg − phi) + 1), arg = E/T (no cutoff).
+    """
+    Fermi-Dirac occupation 1/(exp(arg - phi) + 1).
 
-    0 where exp(arg − phi) overflows, with the exponent masked there so autodiff tangents stay finite;
-    a NaN argument stays NaN.
+    Zero where the exponential would overflow, with the exponent masked there so that
+    autodiff tangents stay finite.
+
+    Parameters
+    ----------
+    arg : float or array
+        Energy over temperature E/T.
+    phi : float
+        Degeneracy mu/T.
+
+    Returns
+    -------
+    float or array
+        Dimensionless.
     """
     x = arg - phi
     ok = ~(x > _EXP_MAX)
     return jnp.where(ok, 1.0 / (jnp.exp(jnp.where(ok, x, 0.0)) + 1.0), 0.0)
 
 
-def rho_gamma(T):
-    """Photon energy density (π²/15)T⁴ (g = 2)."""
-    return PI**2 / 15.0 * T**4
-
-
-def pressure_gamma(T):
-    """Photon pressure: ρ_γ/3."""
-    return rho_gamma(T) / 3.0
-
-
-def rho_electron(T, phi=0.0, m=M_ELECTRON, nodes=None, weights=None):
-    """e⁻ + e⁺ energy density [MeV⁴]: (T⁴/π²)∫x²(E/T)[f₋+f₊]dx over x = p/T, with phi = μ/T.
-
-    ``nodes``/``weights`` replace the 100-node plain Gauss–Laguerre rule (BURST's 25-node rule
-    reproduces its quadrature bit-for-bit); ``m`` [MeV] is the bare electron mass by default.
+def _fd_equil(E, phie):
     """
-    x = _X if nodes is None else jnp.asarray(nodes)
-    w = _W if weights is None else jnp.asarray(weights)
-    z = m / T
-    e = jnp.sqrt(x**2 + z**2)               # E/T
-    occ = _fd(e, phi) + _fd(e, -phi)        # electrons + positrons
-    return T**4 / PI**2 * jnp.sum(w * x**2 * e * occ)
+    Fermi-Dirac occupation 1/(exp(E - phie) + 1) with the occupation cutoff.
 
-
-def pressure_electron(T, phi=0.0, m=M_ELECTRON, nodes=None, weights=None):
-    """e⁻ + e⁺ pressure [MeV⁴]: (g/2π²)∫p²(p²/3E)[f₋+f₊]dp, g = 2; arguments as rho_electron."""
-    x = _X if nodes is None else jnp.asarray(nodes)
-    w = _W if weights is None else jnp.asarray(weights)
-    z = m / T
-    e = jnp.sqrt(x**2 + z**2)
-    occ = _fd(e, phi) + _fd(e, -phi)
-    return T**4 / (3.0 * PI**2) * jnp.sum(w * x**4 / e * occ)
-
-
-def rho_plasma(T, phi=0.0, m=M_ELECTRON):
-    """Free-gas photon + e± energy density [MeV⁴] (bare electron mass by default).
-
-    Finite-T QED is not a shift of ``m``; the caller adds the δρ of qed_plasma_deltas.
-    """
-    return rho_gamma(T) + rho_electron(T, phi, m)
-
-
-def pressure_plasma(T, phi=0.0, m=M_ELECTRON):
-    """Free-gas photon + e± pressure [MeV⁴]; QED δP is added by the caller, as for rho_plasma."""
-    return pressure_gamma(T) + pressure_electron(T, phi, m)
-
-
-def drho_plasma_dT(T, m=M_ELECTRON):
-    """dρ_plasma/dT [MeV³] at φ = 0, analytic: 4π²T³/15 + (2T³/π²)∫x²(x²+z²)f(1−f)dx, z = m/T.
-
-    The fixed-p derivative of the continuum integral; it matches autodiff of the quadrature
-    (drho_plasma_dT_autodiff) to quadrature accuracy, not bitwise.
-    """
-    z = m / T
-    e = jnp.sqrt(_X**2 + z**2)
-    f = _fd(e, 0.0)
-    drho_e = 2.0 * T**3 / PI**2 * jnp.sum(_W * _X**2 * (_X**2 + z**2) * f * (1.0 - f))
-    return 4.0 * PI**2 * T**3 / 15.0 + drho_e
-
-
-def drho_plasma_dT_phi(T, phi, m=M_ELECTRON):
-    """dρ_plasma/dT [MeV³] at fixed φ, by autodiff of the quadrature (no dφ/dT feedback)."""
-    return jax.grad(lambda t: rho_plasma(t, phi, m))(T)
-
-
-# autodiff of the quadrature at φ = 0: the cross-check for drho_plasma_dT
-drho_plasma_dT_autodiff = jax.grad(lambda T: rho_plasma(T, 0.0))
-
-
-# ==== charge-neutral electron degeneracy φ_e ====================================================
-
-# n_γ = N_GAMMA·T³ (g = 2).
-N_GAMMA = 2.0 * ZETA3 / PI**2
-
-# Present baryon-to-photon ratio n_b/n_γ, LINX's const.eta0 (Ω_b h² = 0.02242); the coupled LINX
-# solve passes its own value.
-ETA0_DEFAULT = 6.0913e-10
-
-# (T_γ/T_cm)³ today for instantaneous e± annihilation: carries η0 (quoted at today's photon
-# temperature) onto the comoving T_cm.  The true ratio differs by ~0.2%, irrelevant for φ_e.
-_ELEVEN_OVER_FOUR = 11.0 / 4.0
-
-
-def net_electron_number_over_T3(phi, mt, nodes=None, weights=None):
-    """Net electron number (n_{e⁻} − n_{e⁺})/T_pl³ at degeneracy φ, mt = m_e/T_pl.
-
-    (1/π²)∫x²[f(E−φ) − f(E+φ)]dx (g = 2, x = p/T_pl, E = √(x²+mt²)), with the difference written
-    as sinh φ/(cosh E + cosh φ): the naive subtraction cancels catastrophically at φ ~ 1e-9.
-    E > 300 is zeroed (BURST's cutoff).  ``nodes``/``weights``: plain Gauss–Laguerre rule over x
-    (default 25 nodes).
-    """
-    x = _X_DEFAULT if nodes is None else jnp.asarray(nodes)
-    w = _W_DEFAULT if weights is None else jnp.asarray(weights)
-    E = jnp.sqrt(x**2 + mt**2)
-    in_range = E < _FD_CUTOFF
-    cE = jnp.cosh(jnp.where(in_range, E, 0.0))          # finite (cosh(0)=1 in masked bins)
-    diff = jnp.sinh(phi) / (cE + jnp.cosh(phi))         # f(E−φ)−f(E+φ), cancellation-free
-    diff = jnp.where(in_range, diff, 0.0)               # BURST's E > 300 cutoff
-    return jnp.sum(w * x**2 * diff) / PI**2
-
-
-def _dnet_dphi_over_T3(phi, mt, nodes=None, weights=None):
-    """∂/∂φ of net_electron_number_over_T3, for Newton.
-
-    d/dφ [sinh φ/(cosh E + cosh φ)] = (cosh E cosh φ + 1)/(cosh E + cosh φ)² ≥ 0, so the net
-    number is monotone in φ.
-    """
-    x = _X_DEFAULT if nodes is None else jnp.asarray(nodes)
-    w = _W_DEFAULT if weights is None else jnp.asarray(weights)
-    E = jnp.sqrt(x**2 + mt**2)
-    in_range = E < _FD_CUTOFF
-    cE = jnp.cosh(jnp.where(in_range, E, 0.0))
-    cphi = jnp.cosh(phi)
-    integ = x**2 * (cE * cphi + 1.0) / (cE + cphi) ** 2
-    return jnp.sum(w * jnp.where(in_range, integ, 0.0)) / PI**2
-
-
-def nb_over_Tcm3(eta0):
-    """n_b/T_cm³ for the present baryon-to-photon ratio ``eta0``: η0·N_GAMMA·(11/4)."""
-    return eta0 * N_GAMMA * _ELEVEN_OVER_FOUR
-
-
-def solve_phie(tplmev, tcmpl, eta0, q_baryon=0.5, m_e=M_ELECTRON,
-               nodes=None, weights=None, n_newton=6):
-    """Charge-neutral electron degeneracy φ_e = μ_e/T_pl at T_pl = tplmev [MeV], tcmpl = T_cm/T_pl.
-
-    Solves (n_{e⁻} − n_{e⁺})/T_pl³ = q_baryon·nb_over_Tcm3(eta0)·tcmpl³ with ``n_newton`` unrolled
-    Newton steps (6 is ample) from an asinh seed; φ_e ≥ 0 for q_baryon > 0.  Valid while
-    T_pl > m_e/300 ≈ 1.7 keV (from T_init = 10 MeV, ln a ≲ 8.8): below it BURST's E/T > 300
-    occupation cutoff removes every quadrature node and the result is NaN.
+    Zero for E above the cutoff, with the exponent masked there so that autodiff tangents
+    stay finite.
 
     Parameters
     ----------
-    eta0 : float
-        Present baryon-to-photon ratio (LINX ``const.eta0`` ≈ 6.1e-10).
-    q_baryon : float
-        Net charge per baryon Σ Z_i Y_i.  The default 0.5 is the high-T n/p ≈ 1 value; it drifts
-        (to ~0.87) only below where φ_e affects N_eff.
-    """
-    mt = m_e / tplmev
-    target = q_baryon * nb_over_Tcm3(eta0) * tcmpl**3        # (n_{e⁻}−n_{e⁺})/T_pl³ required
+    E : float or array
+        Energy over temperature E/T.
+    phie : float
+        Degeneracy mu/T.
 
-    # seed: net ≈ slope(0)·sinh φ for φ ≪ 1
-    slope0 = _dnet_dphi_over_T3(0.0, mt, nodes, weights)
-    phi = jnp.arcsinh(target / slope0)
-
-    for _ in range(n_newton):
-        f = net_electron_number_over_T3(phi, mt, nodes, weights) - target
-        fp = _dnet_dphi_over_T3(phi, mt, nodes, weights)
-        phi = phi - f / fp
-    return jnp.where(slope0 > 0.0, phi, jnp.nan)   # NaN past the validity limit: fail loudly
-
-
-def phie_linear(tplmev, tcmpl, eta0, q_baryon=0.5, m_e=M_ELECTRON, nodes=None, weights=None):
-    """BURST's linearized charge-neutrality φ_e = target/(∂net/∂φ at φ = 0), for validation.
-
-    Equals solve_phie to machine precision at high T (φ_e ~ 1e-9).
-    """
-    mt = m_e / tplmev
-    target = q_baryon * nb_over_Tcm3(eta0) * tcmpl**3
-    return target / _dnet_dphi_over_T3(0.0, mt, nodes, weights)
-
-
-# ==== finite-T QED mass renormalization (δm_e², δm_γ²) ===========================================
-
-def _fd_equil(E, phie):
-    """Fermi–Dirac 1/(exp(E − phie) + 1), zero for E > 300 (BURST's cutoff).
-
-    The cutoff also zeroes the exp(E)·f² second-derivative integrands in the tail, as BURST does.
+    Returns
+    -------
+    float or array
+        Dimensionless.
     """
     keep = E <= _FD_CUTOFF
     f = 1.0 / (jnp.exp(jnp.where(keep, E, 0.0) - phie) + 1.0)   # masked: finite AD tangents
     return jnp.where(keep, f, 0.0)
 
 
-def get_eg_mass_renorm(tplmev, phie, nodes=None, weights=None, m_e=M_ELECTRON):
-    """Momentum-independent thermal QED mass corrections (BURST's get_eg_mass_renorm).
-
-    Returns (dmeeps2, dmedteps, dmedt2, dmgeps2, dmgdteps, dmgdt2), BURST's out-args in order:
-    δm_e²/T_pl² and its first and second T-derivative terms, then the same for δm_γ²
-    (dimensionless).  ``nodes``/``weights``: plain Gauss–Laguerre rule over x = p/T_pl (default 25
-    nodes, as BURST); ``phie`` = μ_e/T_pl; ``m_e`` [MeV] may be traced.
-    """
-    if nodes is None:
-        nodes = _X_DEFAULT
-    if weights is None:
-        weights = _W_DEFAULT
-    x = jnp.asarray(nodes)
-    dx = jnp.asarray(weights)
-
-    a = ALPHA_FS
-    mt = m_e / tplmev                      # m_e / T_pl
-    E = jnp.sqrt(x**2 + mt**2)             # E / T_pl
-
-    occ1 = _fd_equil(E, phie)             # e- (etadeg = +phie)
-    occ2 = _fd_equil(E, -phie)            # e+ (etadeg = -phie)
-    occ_sum = occ1 + occ2
-
-    intval = jnp.sum(dx * x**2 / E * occ_sum)
-    intvaldt = jnp.sum(dx * (2.0 * x**2 + mt**2) / E * occ_sum)
-    # 2nd-derivative integrand mt²·exp(E)·(e^{−φ}occ1² + e^{φ}occ2²): mask the exp argument too, so
-    # the cutoff tail stays 0 instead of inf·0 = NaN once exp(E) overflows (E ≳ 709).
-    in_range = E <= _FD_CUTOFF
-    exp_E = jnp.exp(jnp.where(in_range, E, 0.0))
-    intvaldt2 = mt**2 * jnp.sum(
-        jnp.where(in_range,
-                  dx * exp_E * (jnp.exp(-phie) * occ1**2 + jnp.exp(phie) * occ2**2), 0.0)
-    )
-
-    two_a_over_pi = 2.0 * a / PI
-    four_a_over_pi = 4.0 * a / PI
-
-    dmeeps2 = 2.0 * PI * a / 3.0 + two_a_over_pi * intval
-    dmedteps = 4.0 * PI * a / 3.0 + two_a_over_pi * intvaldt
-    dmedt2 = 4.0 * PI * a / 3.0 + two_a_over_pi * (intvaldt + intvaldt2)
-
-    dmgeps2 = four_a_over_pi * intval
-    dmgdteps = four_a_over_pi * intvaldt
-    dmgdt2 = four_a_over_pi * (intvaldt + intvaldt2)
-
-    return dmeeps2, dmedteps, dmedt2, dmgeps2, dmgdteps, dmgdt2
-
-
-def delta_me2(tplmev, phie=0.0, nodes=None, weights=None, m_e=M_ELECTRON):
-    """Electron thermal mass² δm_e² [MeV²] = dmeeps2·T_pl²."""
-    dmeeps2 = get_eg_mass_renorm(tplmev, phie, nodes, weights, m_e=m_e)[0]
-    return dmeeps2 * tplmev**2
-
-
-def delta_mg2(tplmev, phie=0.0, nodes=None, weights=None, m_e=M_ELECTRON):
-    """Photon thermal mass² δm_γ² [MeV²] = dmgeps2·T_pl²."""
-    dmgeps2 = get_eg_mass_renorm(tplmev, phie, nodes, weights, m_e=m_e)[3]
-    return dmgeps2 * tplmev**2
-
-
-def m_e_eff(tplmev, phie=0.0, nodes=None, weights=None, m_e=M_ELECTRON):
-    """Thermal effective electron mass √(m_e² + δm_e²) [MeV].
-
-    Not used by the solvers: the EoS and the lepton kernels take the bare mass, and finite-T QED
-    enters the EoS additively.
-    """
-    return jnp.sqrt(m_e**2 + delta_me2(tplmev, phie, nodes, weights, m_e=m_e))
-
-
-# ---- momentum-dependent electron self-energy (BURST's second thermo loop) ----------------------
-
-# Inner rules (BURST's rlgndrbins = 50, rlagurbins = 100): per outer momentum peps the Legendre rule
-# is reflected about the integrable 1/(peps − y) singularity to cover [0, 2·peps], and the Laguerre
-# rule is shifted onto [2·peps, ∞).
-_N_LGNDR_PDEP = 50
-_N_LAGUR_PDEP = 100
-_T_LG, _W_LG = legendre_canonical(_N_LGNDR_PDEP)
-_T_LAG, _W_LAG = gauss_laguerre_plain(_N_LAGUR_PDEP)
-
-
-def get_e_mass_pdep(tplmev, phie, peps, lg_nodes=None, lg_weights=None,
-                    lag_nodes=None, lag_weights=None, m_e=M_ELECTRON):
-    """Momentum-dependent correction to (m_e/T_pl)² and its derivatives at peps = p/T_pl.
-
-    Port of BURST's get_e_mass_pdep: the inner integral over y = k/T_pl uses the reflected Legendre
-    + shifted Laguerre rules above (BURST's principal-value construction); ``lg_*``/``lag_*``
-    replace their canonical forms.  ``peps`` is a scalar or (K,).  Returns (dmep1..dmep5) shaped
-    like ``peps``: δm_e²(p)/T², d/dT, d/dp, d²/dT², d²/dpdT (BURST's order), zero at peps = 0.
-    """
-    t_lg = _T_LG if lg_nodes is None else jnp.asarray(lg_nodes)
-    w_lg_c = _W_LG if lg_weights is None else jnp.asarray(lg_weights)
-    t_lag = _T_LAG if lag_nodes is None else jnp.asarray(lag_nodes)
-    w_lag_c = _W_LAG if lag_weights is None else jnp.asarray(lag_weights)
-
-    peps = jnp.asarray(peps)
-    scalar_in = peps.ndim == 0
-    p = jnp.atleast_1d(peps)[:, None]      # (K,1) outer momenta
-
-    mt = m_e / tplmev
-
-    # Inner abscissas/weights, broadcast over outer nodes -> (K, 2*n_lg + n_lag).
-    y_lg1 = 0.5 * p * (1.0 + t_lg[None, :])         # Legendre [0, peps]      (j=1)
-    y_lg2 = 2.0 * p - y_lg1                         # reflected [peps, 2peps] (j=2, same weights)
-    w_lg = 0.5 * p * w_lg_c[None, :]
-    y_lag = 2.0 * p + t_lag[None, :]                # shifted Laguerre [2peps, inf)
-    w_lag = jnp.broadcast_to(w_lag_c[None, :], y_lag.shape)
-
-    y = jnp.concatenate([y_lg1, y_lg2, y_lag], axis=1)
-    dy = jnp.concatenate([w_lg, w_lg, w_lag], axis=1)
-
-    E = jnp.sqrt(y**2 + mt**2)
-    occ1 = _fd_equil(E, phie)
-    occ2 = _fd_equil(E, -phie)
-    osum = occ1 + occ2
-    # exp(E)·(e^{−φ}occ1² + e^{φ}occ2²), exp argument masked as in get_eg_mass_renorm
-    in_range = E <= _FD_CUTOFF
-    exp_E = jnp.exp(jnp.where(in_range, E, 0.0))
-    osq = jnp.where(in_range,
-                    exp_E * (jnp.exp(-phie) * occ1**2 + jnp.exp(phie) * occ2**2), 0.0)
-
-    # 1/(peps ± y) factors: no node sits on y = peps, and the reflected pairs cancel the pole.
-    d = p - y
-    ip = 1.0 / (p + y)
-    im = jnp.where(d != 0.0, 1.0 / jnp.where(d != 0.0, d, 1.0), 0.0)
-    lg = jnp.log((p + y) / jnp.abs(jnp.where(d != 0.0, d, 1.0)))
-    lg = jnp.where(d != 0.0, lg, 0.0)
-
-    y_in = y < 300.0                                 # BURST's y < 300 guard (intval4/5 only)
-
-    intval = jnp.sum(dy * y / E * lg * osum, axis=1)
-    intval2 = jnp.sum(dy * E * (ip + im) * osum, axis=1)
-    intval3 = jnp.sum(dy * y / E * (ip - im) * osum, axis=1)
-    intval4 = jnp.sum(jnp.where(y_in, dy * (y**2 + mt**2) * (ip + im) * osq, 0.0), axis=1)
-    intval5 = jnp.sum(jnp.where(y_in, dy * y * (ip - im) * osq, 0.0), axis=1)
-
-    pref = -(mt**2) * ALPHA_FS / PI
-    nz = jnp.atleast_1d(peps) != 0.0                 # peps==0 -> dmep = 0
-    dmep1 = jnp.where(nz, pref * intval, 0.0)
-    dmep2 = jnp.where(nz, pref * (intval + intval2), 0.0)
-    dmep3 = jnp.where(nz, pref * intval3, 0.0)
-    dmep4 = jnp.where(nz, pref * intval4, 0.0)
-    dmep5 = jnp.where(nz, pref * intval5, 0.0)
-
-    if scalar_in:
-        return dmep1[0], dmep2[0], dmep3[0], dmep4[0], dmep5[0]
-    return dmep1, dmep2, dmep3, dmep4, dmep5
-
-
-# ==== finite-T QED corrections to the e±/γ EoS ====================================================
-
 def _be(x):
-    """Bose–Einstein occupation 1/(exp(x) − 1), zero outside (0, 300]."""
+    """
+    Bose-Einstein occupation 1/(exp(x) - 1) with the occupation cutoff.
+
+    Zero for x <= 0 and for x above the cutoff.
+
+    Parameters
+    ----------
+    x : float or array
+        Energy over temperature E/T.
+
+    Returns
+    -------
+    float or array
+        Dimensionless.
+    """
     f = 1.0 / (jnp.exp(x) - 1.0)
     return jnp.where((x > 0.0) & (x <= _FD_CUTOFF), f, 0.0)
 
 
-def qed_eos_corrections(tplmev, phie=0.0, nodes=None, weights=None, m_e=M_ELECTRON):
-    """Momentum-independent O(α) QED corrections to the e±/γ EoS (BURST's glag terms).
+# ==== the plasma model ===========================================================================
 
-    Returns (d_rho_gamma, d_P_gamma, d_drho_gamma_dT, d_rho_e, d_P_e, d_drho_e_dT): δρ, δP [MeV⁴]
-    and δ(dρ/dT) [MeV³], photon then e±, additive to the bare-mass free-gas EoS.  Arguments as
-    get_eg_mass_renorm, whose self-energies are evaluated on the same rule.
+# Standard-Model T_gamma/T_cm after e+e- annihilation, from this code's reference solve.
+RATIO_TODAY_SM = 1.3979608
+
+
+class Thermo(eqx.Module):
     """
-    if nodes is None:
-        nodes = _X_DEFAULT
-    if weights is None:
-        weights = _W_DEFAULT
-    x = jnp.asarray(nodes)
-    dx = jnp.asarray(weights)
+    Thermodynamics of the photon and e+e- plasma on fixed quadrature rules.
 
-    dmeeps2, dmedteps, dmedt2, dmgeps2, dmgdteps, dmgdt2 = get_eg_mass_renorm(
-        tplmev, phie, x, dx, m_e=m_e
-    )
-
-    mt = m_e / tplmev                      # bare m_e / T_pl
-    exm = jnp.sqrt(x**2 + mt**2)           # E / T_pl
-    occ_be = _be(x)                        # photon
-    occ1 = _fd_equil(exm, phie)                  # e- (etadeg = +phie)
-    occ2 = _fd_equil(exm, -phie)                 # e+ (etadeg = -phie)
-    occ_e = occ1 + occ2
-
-    pref4 = tplmev**4 / PI**2              # ρ, P normalization [MeV⁴] (BURST's mev4tocgs dropped)
-    pref3 = tplmev**3 / PI**2             # dρ/dT normalization [MeV³]
-
-    # --- photon correction pieces ---
-    d_rho_gamma = pref4 * jnp.sum(-dx / 4.0 * x * (dmgeps2 + dmgdteps) * occ_be)
-    d_P_gamma = pref4 * jnp.sum(-dx / 4.0 * x * dmgeps2 * occ_be)
-    d_drho_gamma_dT = pref3 * jnp.sum(
-        -dx / 4.0 * x * (2.0 * dmgeps2 + 4.0 * dmgdteps + dmgdt2) * occ_be
-    )
-
-    # --- electron+positron correction pieces ---
-    d_rho_e = pref4 * jnp.sum(
-        -dx / 4.0 * (exm * dmeeps2 + x**2 / exm * dmedteps) * occ_e
-    )
-    d_P_e = pref4 * jnp.sum(-dx / 4.0 * x**2 / exm * dmeeps2 * occ_e)
-    # exp(exm)·occ², exp argument masked against inf·0 = NaN (exm > 709 below T_pl ≈ 7.2e-4 MeV)
-    in_range = exm <= _FD_CUTOFF
-    exp_exm = jnp.exp(jnp.where(in_range, exm, 0.0))
-    occ_sq = jnp.where(in_range,
-                       exp_exm * (jnp.exp(-phie) * occ1**2 + jnp.exp(phie) * occ2**2), 0.0)
-    d_drho_e_dT = pref3 * jnp.sum(
-        -dx / 4.0 * (2.0 * (2.0 * x**2 + mt**2) / exm * dmedteps + x**2 / exm * dmedt2) * occ_e
-        - dx / 4.0 * exm**2 * dmeeps2 * occ_sq
-    )
-
-    return (d_rho_gamma, d_P_gamma, d_drho_gamma_dT, d_rho_e, d_P_e, d_drho_e_dT)
-
-
-def qed_eos_pdep_corrections(tplmev, phie=0.0, nodes=None, weights=None, m_e=M_ELECTRON,
-                             **pdep_rules):
-    """Momentum-dependent e± QED EoS corrections (BURST's second thermo loop).
-
-    Evaluates get_e_mass_pdep (inner rules via ``**pdep_rules``) at every node of the outer rule
-    over x = p/T_pl (default 25 nodes) and accumulates its dmep terms into (d_rho_e, d_P_e [MeV⁴],
-    d_drho_e_dT [MeV³]), additive to qed_eos_corrections' e± terms.  BURST's dρ_e/dφ_e term
-    (glag6) is not ported; it is negligible at φ_e ~ 1e-10.
-    """
-    if nodes is None:
-        nodes = _X_DEFAULT
-    if weights is None:
-        weights = _W_DEFAULT
-    x = jnp.asarray(nodes)
-    dx = jnp.asarray(weights)
-
-    mt = m_e / tplmev
-    exm = jnp.sqrt(x**2 + mt**2)
-    occ1 = _fd_equil(exm, phie)
-    occ2 = _fd_equil(exm, -phie)
-    occ_e = occ1 + occ2
-    # exp(exm)·occ², exp argument masked as in qed_eos_corrections
-    in_range = exm <= _FD_CUTOFF
-    exp_exm = jnp.exp(jnp.where(in_range, exm, 0.0))
-    occ_sq = jnp.where(in_range,
-                       exp_exm * (jnp.exp(-phie) * occ1**2 + jnp.exp(phie) * occ2**2), 0.0)
-
-    dmep1, dmep2, dmep3, dmep4, dmep5 = get_e_mass_pdep(tplmev, phie, x, m_e=m_e, **pdep_rules)
-
-    pref4 = tplmev**4 / PI**2
-    pref3 = tplmev**3 / PI**2
-
-    d_rho_e = pref4 * jnp.sum(-dx / 4.0 * (x / exm * dmep2 + exm * dmep3) * occ_e)
-    d_P_e = pref4 * jnp.sum(-dx / 4.0 * x / exm * dmep1 * occ_e)
-    d_drho_e_dT = pref3 * jnp.sum(
-        -dx / 4.0 * (2.0 * x / exm * dmep2 + x / exm * dmep4 + 2.0 * exm * dmep5) * occ_e
-        - dx / 4.0 * exm**2 * dmep3 * occ_sq
-    )
-    return d_rho_e, d_P_e, d_drho_e_dT
-
-
-def qed_eos_e3_pressure(tplmev, m_e=M_ELECTRON, nodes=None, weights=None):
-    """NLO O(e³) finite-T QED interaction pressure δP_{e³} [MeV⁴], which the O(α) terms omit.
-
-    Port of LINX's ``explicit_P3`` (Bennett et al., arXiv:1911.04504, eq. 4.24):
-
-        δP_{e³} = (e³/12π⁴) T_pl⁴ J^{3/2},   J = Σ_i w_i (2x_i² + mt²)/E_i · 2/(e^{E_i} + 1),
-
-    with e³ = (4πα)^{3/2}, x = p/T_pl, mt = m_e/T_pl, E = √(x² + mt²).  BURST's E > 300 occupation
-    cutoff makes δP exactly 0, with zero T-derivatives, once every node is cut (T_pl < m_e/300); the
-    autodiff derivatives of qed_eos_e3_deltas would otherwise be NaN below T_pl ≈ 7e-4 MeV.
-    """
-    if nodes is None:
-        nodes = _X_DEFAULT
-    if weights is None:
-        weights = _W_DEFAULT
-    x = jnp.asarray(nodes)
-    dx = jnp.asarray(weights)
-    mt = m_e / tplmev
-    exm = jnp.sqrt(x**2 + mt**2)
-    in_range = exm <= _FD_CUTOFF                          # exp argument masked against inf/inf
-    fd = jnp.where(in_range, 2.0 / (jnp.exp(jnp.where(in_range, exm, 0.0)) + 1.0), 0.0)
-    jint = jnp.sum(dx * (2.0 * x**2 + mt**2) / exm * fd)  # dimensionless J
-    e3 = (4.0 * PI * ALPHA_FS) ** 1.5                     # e³
-    # J^{3/2} at J = 0 has an infinite second derivative (inf·0 = NaN): evaluate it at J > 0 only
-    pos = jint > 0.0
-    jint_pos = jnp.where(pos, jint, 1.0)
-    return jnp.where(pos, e3 / (12.0 * PI**4) * tplmev**4 * jint_pos**1.5, 0.0)
-
-
-def qed_eos_e3_deltas(tplmev, m_e=M_ELECTRON, nodes=None, weights=None):
-    """NLO O(e³) QED corrections (δρ, δP, δ(dρ/dT)) [MeV⁴, MeV⁴, MeV³], additive to the O(α) ones.
-
-    δρ = T dP/dT − P and δ(dρ/dT) = T d²P/dT², with the T-derivatives by forward-mode autodiff of
-    qed_eos_e3_pressure (so m_e may be traced).
-    """
-    if nodes is None:
-        nodes = _X_DEFAULT
-    if weights is None:
-        weights = _W_DEFAULT
-    nodes = jnp.asarray(nodes)
-    weights = jnp.asarray(weights)
-
-    def _P(T):
-        return qed_eos_e3_pressure(T, m_e=m_e, nodes=nodes, weights=weights)
-
-    def _dP(T):
-        return jax.jvp(_P, (T,), (jnp.ones_like(T),))[1]
-
-    Tp = jnp.asarray(tplmev)
-    P = _P(Tp)
-    dP = _dP(Tp)
-    d2P = jax.jvp(_dP, (Tp,), (jnp.ones_like(Tp),))[1]
-    drho = Tp * dP - P
-    dC = Tp * d2P
-    return drho, P, dC
-
-
-def qed_plasma_deltas(tplmev, phie=0.0, nodes=None, weights=None, pdep=True, m_e=M_ELECTRON,
-                      nlo=False):
-    """Photon + e± QED corrections (δρ, δP, δ(dρ/dT)) [MeV⁴, MeV⁴, MeV³], the RHS's one call.
-
-    Add to rho_plasma, pressure_plasma and drho_plasma_dT.
+    The Gauss rules used by the energy-density, degeneracy and QED integrals are built
+    once at construction and shared by every method.
 
     Parameters
     ----------
-    pdep : bool
-        Include the momentum-dependent terms (qed_eos_pdep_corrections), as BURST does.
-    nlo : bool
-        Add the NLO O(e³) term (qed_eos_e3_deltas).  False reproduces BURST (O(α) only); the
-        solvers default to True, the order of the N_eff = 3.044 literature.
+    N_qed : int, optional
+        Gauss-Laguerre nodes for the electron degeneracy and the QED corrections.
+        Default is 80.
+    N_free : int, optional
+        Gauss-Laguerre nodes for the free-gas equation of state. Default is 100.
+    N_lg : int, optional
+        Gauss-Legendre nodes of the inner integral of the momentum-dependent
+        self-energy. Default is 50.
+    N_lag : int, optional
+        Gauss-Laguerre nodes of the inner integral of the momentum-dependent
+        self-energy. Default is 100.
+    ratio_today : float, optional
+        T_gamma/T_cm after e+e- annihilation, which converts eta0 to the comoving
+        baryon density. Default is the Standard-Model value.
+
+    Notes
+    -----
+    The free gas uses the bare electron mass. Finite-temperature QED enters as
+    additive corrections to rho, P and drho/dT (``qed_plasma_deltas``) built from the
+    thermal self-energies; folding the thermal mass into the free gas as well would
+    double count.
     """
-    d = qed_eos_corrections(tplmev, phie, nodes, weights, m_e=m_e)
-    rho, P, drho = d[0] + d[3], d[1] + d[4], d[2] + d[5]
-    if pdep:
-        dp = qed_eos_pdep_corrections(tplmev, phie, nodes, weights, m_e=m_e)
-        rho, P, drho = rho + dp[0], P + dp[1], drho + dp[2]
-    if nlo:
-        e3 = qed_eos_e3_deltas(tplmev, m_e=m_e, nodes=nodes, weights=weights)
-        rho, P, drho = rho + e3[0], P + e3[1], drho + e3[2]
-    return rho, P, drho
 
+    N_qed: int = eqx.field(static=True)
+    N_free: int = eqx.field(static=True)
+    N_lg: int = eqx.field(static=True)
+    N_lag: int = eqx.field(static=True)
+    x_qed: jnp.ndarray
+    w_qed: jnp.ndarray
+    x_free: jnp.ndarray
+    w_free: jnp.ndarray
+    t_lg: jnp.ndarray
+    w_lg: jnp.ndarray
+    t_lag: jnp.ndarray
+    w_lag: jnp.ndarray
+    ratio_today: float
 
-def rho_plasma_qed_delta(tplmev, phie=0.0, nodes=None, weights=None, pdep=True, m_e=M_ELECTRON,
-                         nlo=False):
-    """QED δρ_γ + δρ_e [MeV⁴], to add to rho_plasma; O(α), plus O(e³) with nlo=True."""
-    return qed_plasma_deltas(tplmev, phie, nodes, weights, pdep, m_e=m_e, nlo=nlo)[0]
+    def __init__(self, N_qed=80, N_free=100, N_lg=50, N_lag=100, ratio_today=RATIO_TODAY_SM):
+        self.N_qed, self.N_free, self.N_lg, self.N_lag = int(N_qed), int(N_free), int(N_lg), int(N_lag)
+        self.x_qed, self.w_qed = gauss_laguerre_plain(self.N_qed)
+        self.x_free, self.w_free = gauss_laguerre_plain(self.N_free)
+        self.t_lg, self.w_lg = legendre_canonical(self.N_lg)
+        self.t_lag, self.w_lag = gauss_laguerre_plain(self.N_lag)
+        self.ratio_today = ratio_today
 
+    def nb_tcm3(self, eta0):
+        """
+        Comoving baryon number density n_b/T_cm^3 at this model's ``ratio_today``.
 
-def pressure_plasma_qed_delta(tplmev, phie=0.0, nodes=None, weights=None, pdep=True,
-                              m_e=M_ELECTRON, nlo=False):
-    """QED δP_γ + δP_e [MeV⁴], to add to pressure_plasma; O(α), plus O(e³) with nlo=True."""
-    return qed_plasma_deltas(tplmev, phie, nodes, weights, pdep, m_e=m_e, nlo=nlo)[1]
+        Parameters
+        ----------
+        eta0 : float
+            Present baryon-to-photon ratio.
 
+        Returns
+        -------
+        float
+            Dimensionless.
+        """
+        return nb_over_Tcm3(eta0, self.ratio_today)
 
-def drho_plasma_dT_qed_delta(tplmev, phie=0.0, nodes=None, weights=None, pdep=True,
-                             m_e=M_ELECTRON, nlo=False):
-    """QED δ(dρ_γ/dT) + δ(dρ_e/dT) [MeV³], to add to drho_plasma_dT; O(α), + O(e³) if nlo."""
-    return qed_plasma_deltas(tplmev, phie, nodes, weights, pdep, m_e=m_e, nlo=nlo)[2]
+    # ---- free-gas e± and γ ----------------------------------------------------------------------
 
+    def rho_electron(self, T, phi=0.0, m=M_ELECTRON):
+        """
+        Energy density of electrons and positrons.
 
-# ==== the decoupling background clock =============================================================
+        Parameters
+        ----------
+        T : float
+            Plasma temperature in MeV.
+        phi : float, optional
+            Electron degeneracy mu_e/T. Default is 0.
+        m : float, optional
+            Electron mass in MeV. Default is the bare mass.
 
-_SEVEN_EIGHTHS = 7.0 / 8.0
-_N_NU_DEFAULT = 3.0  # thermally populated flavours (ν + ν̄ each)
+        Returns
+        -------
+        float
+            Units of MeV^4.
+        """
+        x, w = self.x_free, self.w_free
+        z = m / T
+        e = jnp.sqrt(x**2 + z**2)               # E/T
+        occ = _fd(e, phi) + _fd(e, -phi)        # electrons + positrons
+        return T**4 / jnp.pi**2 * jnp.sum(w * x**2 * e * occ)
 
+    def pressure_electron(self, T, phi=0.0, m=M_ELECTRON):
+        """
+        Pressure of electrons and positrons.
 
-def rho_nu(T_nu, n_nu=_N_NU_DEFAULT):
-    """Massless thermal neutrino energy density n_nu·(7/8)(π²/15)T_ν⁴ [MeV⁴]."""
-    return n_nu * _SEVEN_EIGHTHS * PI**2 / 15.0 * T_nu**4
+        Parameters
+        ----------
+        T : float
+            Plasma temperature in MeV.
+        phi : float, optional
+            Electron degeneracy mu_e/T. Default is 0.
+        m : float, optional
+            Electron mass in MeV. Default is the bare mass.
 
+        Returns
+        -------
+        float
+            Units of MeV^4.
+        """
+        x, w = self.x_free, self.w_free
+        z = m / T
+        e = jnp.sqrt(x**2 + z**2)
+        occ = _fd(e, phi) + _fd(e, -phi)
+        return T**4 / (3.0 * jnp.pi**2) * jnp.sum(w * x**4 / e * occ)
 
-def hubble(rho_tot):
-    """H = √(8πρ_tot/(3 MPL²))/ħ [1/s] for ρ_tot in MeV⁴."""
-    return jnp.sqrt(8.0 * PI * rho_tot / (3.0 * MPL**2)) / HBAR
+    def rho_plasma(self, T, phi=0.0, m=M_ELECTRON):
+        """
+        Energy density of the photon and e+e- gas, without QED corrections.
 
+        Parameters
+        ----------
+        T : float
+            Plasma temperature in MeV.
+        phi : float, optional
+            Electron degeneracy mu_e/T. Default is 0.
+        m : float, optional
+            Electron mass in MeV. Default is the bare mass.
 
-def neff(T_nu, T_gamma, n_nu=_N_NU_DEFAULT):
-    """N_eff = (8/7)(11/4)^{4/3} ρ_ν/ρ_γ for thermal neutrinos at T_ν."""
-    return (8.0 / 7.0) * (11.0 / 4.0) ** (4.0 / 3.0) * rho_nu(T_nu, n_nu) / rho_gamma(T_gamma)
+        Returns
+        -------
+        float
+            Units of MeV^4.
+        """
+        return rho_gamma(T) + self.rho_electron(T, phi, m)
 
+    def pressure_plasma(self, T, phi=0.0, m=M_ELECTRON):
+        """
+        Pressure of the photon and e+e- gas, without QED corrections.
 
-def _rhs(lna, T, args):
-    """dT_pl/dln a = −3(ρ_pl + P_pl)/(dρ_pl/dT) at φ = 0: plasma entropy conservation."""
-    rho = rho_plasma(T, 0.0)
-    P = pressure_plasma(T, 0.0)
-    drhodT = drho_plasma_dT(T)
-    return -3.0 * (rho + P) / drhodT
+        Parameters
+        ----------
+        T : float
+            Plasma temperature in MeV.
+        phi : float, optional
+            Electron degeneracy mu_e/T. Default is 0.
+        m : float, optional
+            Electron mass in MeV. Default is the bare mass.
 
+        Returns
+        -------
+        float
+            Units of MeV^4.
+        """
+        return pressure_gamma(T) + self.pressure_electron(T, phi, m)
 
-def evolve_background(T_init=100.0, lna_max=10.0, n_save=256, rtol=1e-10, atol=1e-12):
-    """Instantaneous-decoupling reference: T_pl over ln a ∈ [0, lna_max] (free gas, no ν heating).
+    def drho_plasma_dT(self, T, m=M_ELECTRON):
+        """
+        Heat capacity drho/dT of the photon and e+e- gas at zero degeneracy, without QED
+        corrections.
 
-    T_init [MeV] defaults to 100 so e± start fully relativistic; lna_max = 10 ends at T_ν ≈ 5 keV.
-    Returns a dict of lna, T_pl, T_nu = T_init·e^{−ln a}, ratio = T_pl/T_nu (each ``n_save`` long),
-    ratio_final and neff_final.
-    """
-    term = diffrax.ODETerm(_rhs)
-    saveat = diffrax.SaveAt(ts=jnp.linspace(0.0, lna_max, n_save))
-    controller = diffrax.PIDController(rtol=rtol, atol=atol)
-    sol = diffrax.diffeqsolve(
-        term,
-        diffrax.Tsit5(),
-        t0=0.0,
-        t1=lna_max,
-        dt0=1e-3,
-        y0=jnp.asarray(T_init, dtype=jnp.float64),
-        saveat=saveat,
-        stepsize_controller=controller,
-        max_steps=100_000,
-    )
-    lna = sol.ts
-    T_pl = sol.ys
-    T_nu = T_init * jnp.exp(-lna)
-    return {
-        "lna": lna,
-        "T_pl": T_pl,
-        "T_nu": T_nu,
-        "ratio": T_pl / T_nu,
-        "neff_final": neff(T_nu[-1], T_pl[-1]),
-        "ratio_final": T_pl[-1] / T_nu[-1],
-    }
+        Parameters
+        ----------
+        T : float
+            Plasma temperature in MeV.
+        m : float, optional
+            Electron mass in MeV. Default is the bare mass.
 
+        Returns
+        -------
+        float
+            Units of MeV^3.
+        """
+        x, w = self.x_free, self.w_free
+        z = m / T
+        e = jnp.sqrt(x**2 + z**2)
+        f = _fd(e, 0.0)
+        drho_e = 2.0 * T**3 / jnp.pi**2 * jnp.sum(w * x**2 * (x**2 + z**2) * f * (1.0 - f))
+        return 4.0 * jnp.pi**2 * T**3 / 15.0 + drho_e
 
-def comoving_plasma_entropy(T_pl, lna):
-    """Comoving plasma entropy s_pl·a³ = (ρ_pl + P_pl)/T_pl·e^{3 ln a} at φ = 0.
+    # ---- charge-neutral electron degeneracy φ_e --------------------------------------------------
 
-    T_pl, lna: scalars or a trajectory.  Constant along evolve_background's solution.
-    """
-    rho = jax.vmap(lambda t: rho_plasma(t, 0.0))(jnp.atleast_1d(T_pl))
-    P = jax.vmap(lambda t: pressure_plasma(t, 0.0))(jnp.atleast_1d(T_pl))
-    s = (rho + P) / jnp.atleast_1d(T_pl)
-    return jnp.reshape(s * jnp.exp(3.0 * jnp.atleast_1d(lna)), jnp.shape(T_pl))
+    def net_electron_number_over_T3(self, phi, mt):
+        """
+        Net electron number density (n_e- - n_e+)/T^3.
+
+        The difference of occupations is written as sinh(phi)/(cosh(E) + cosh(phi)), which
+        does not cancel at small phi.
+
+        Parameters
+        ----------
+        phi : float
+            Electron degeneracy mu_e/T.
+        mt : float
+            Electron mass over temperature m_e/T.
+
+        Returns
+        -------
+        float
+            Dimensionless.
+        """
+        x, w = self.x_qed, self.w_qed
+        E = jnp.sqrt(x**2 + mt**2)
+        in_range = E < _FD_CUTOFF
+        cE = jnp.cosh(jnp.where(in_range, E, 0.0))          # finite (cosh(0)=1 in masked bins)
+        diff = jnp.sinh(phi) / (cE + jnp.cosh(phi))         # f(E−φ)−f(E+φ), cancellation-free
+        diff = jnp.where(in_range, diff, 0.0)               # occupation cutoff
+        return jnp.sum(w * x**2 * diff) / jnp.pi**2
+
+    def _dnet_dphi_over_T3(self, phi, mt):
+        """
+        Derivative of ``net_electron_number_over_T3`` with respect to phi.
+
+        Positive for all phi, so the net electron number is monotone in phi and the Newton
+        iteration of ``solve_phie`` is well posed.
+
+        Parameters
+        ----------
+        phi : float
+            Electron degeneracy mu_e/T.
+        mt : float
+            Electron mass over temperature m_e/T.
+
+        Returns
+        -------
+        float
+            Dimensionless.
+        """
+        x, w = self.x_qed, self.w_qed
+        E = jnp.sqrt(x**2 + mt**2)
+        in_range = E < _FD_CUTOFF
+        cE = jnp.cosh(jnp.where(in_range, E, 0.0))
+        cphi = jnp.cosh(phi)
+        integ = x**2 * (cE * cphi + 1.0) / (cE + cphi) ** 2
+        return jnp.sum(w * jnp.where(in_range, integ, 0.0)) / jnp.pi**2
+
+    def solve_phie(self, tplmev, tcmpl, eta0, q_baryon=0.5, m_e=M_ELECTRON, n_newton=6):
+        """
+        Electron degeneracy phi_e = mu_e/T_pl from charge neutrality with the baryons.
+
+        Solves n_e- - n_e+ = q_baryon n_b by Newton iteration from an asinh seed; derivatives
+        are taken through the root by the implicit function theorem.
+
+        Parameters
+        ----------
+        tplmev : float
+            Plasma temperature in MeV.
+        tcmpl : float
+            Ratio of comoving to plasma temperature T_cm/T_pl.
+        eta0 : float
+            Present baryon-to-photon ratio.
+        q_baryon : float, optional
+            Net charge per baryon, sum_i Z_i Y_i. Default is 0.5.
+        m_e : float, optional
+            Electron mass in MeV. Default is the bare mass.
+        n_newton : int, optional
+            Number of unrolled Newton steps. Default is 6.
+
+        Returns
+        -------
+        float
+            Dimensionless. NaN below T_pl = m_e/_FD_CUTOFF, where the occupation cutoff
+            removes every quadrature node.
+        """
+        mt = m_e / tplmev
+        target = q_baryon * self.nb_tcm3(eta0) * tcmpl**3        # (n_{e⁻}−n_{e⁺})/T_pl³ required
+
+        def residual(phi):
+            return self.net_electron_number_over_T3(phi, mt) - target
+
+        def newton(f, phi):
+            for _ in range(n_newton):
+                phi = phi - f(phi) / self._dnet_dphi_over_T3(phi, mt)
+            return phi
+
+        # seed: net ≈ slope(0)·sinh φ for φ ≪ 1; derivatives go through the root implicitly
+        slope0 = self._dnet_dphi_over_T3(0.0, mt)
+        phi0 = jnp.arcsinh(target / slope0)
+        phi = jax.lax.custom_root(residual, phi0, newton, lambda g, y: y / g(1.0))
+        return jnp.where(slope0 > 0.0, phi, jnp.nan)   # NaN past the validity limit: fail loudly
+
+    # ---- finite-T QED mass renormalization (δm_e², δm_γ²) ----------------------------------------
+
+    def get_eg_mass_renorm(self, tplmev, phie, m_e=M_ELECTRON):
+        """
+        Momentum-independent thermal self-energies of the electron and the photon.
+
+        Parameters
+        ----------
+        tplmev : float
+            Plasma temperature in MeV.
+        phie : float
+            Electron degeneracy mu_e/T_pl.
+        m_e : float, optional
+            Electron mass in MeV. Default is the bare mass.
+
+        Returns
+        -------
+        tuple of float
+            (dmeeps2, dmedteps, dmedt2, dmgeps2, dmgdteps, dmgdt2): delta m_e^2/T_pl^2 and
+            its first- and second-derivative terms with respect to T_pl, then the same for
+            delta m_gamma^2. Dimensionless.
+        """
+        x, dx = self.x_qed, self.w_qed
+
+        a = ALPHA_FS
+        mt = m_e / tplmev                      # m_e / T_pl
+        E = jnp.sqrt(x**2 + mt**2)             # E / T_pl
+
+        occ1 = _fd_equil(E, phie)             # e- (etadeg = +phie)
+        occ2 = _fd_equil(E, -phie)            # e+ (etadeg = -phie)
+        occ_sum = occ1 + occ2
+
+        intval = jnp.sum(dx * x**2 / E * occ_sum)
+        intvaldt = jnp.sum(dx * (2.0 * x**2 + mt**2) / E * occ_sum)
+        # 2nd-derivative integrand mt²·exp(E)·(e^{−φ}occ1² + e^{φ}occ2²): mask the exp argument too, so
+        # the cutoff tail stays 0 instead of inf·0 = NaN once exp(E) overflows (E ≳ 709).
+        in_range = E <= _FD_CUTOFF
+        exp_E = jnp.exp(jnp.where(in_range, E, 0.0))
+        intvaldt2 = mt**2 * jnp.sum(
+            jnp.where(in_range,
+                      dx * exp_E * (jnp.exp(-phie) * occ1**2 + jnp.exp(phie) * occ2**2), 0.0)
+        )
+
+        two_a_over_pi = 2.0 * a / jnp.pi
+        four_a_over_pi = 4.0 * a / jnp.pi
+
+        dmeeps2 = 2.0 * jnp.pi * a / 3.0 + two_a_over_pi * intval
+        dmedteps = 4.0 * jnp.pi * a / 3.0 + two_a_over_pi * intvaldt
+        dmedt2 = 4.0 * jnp.pi * a / 3.0 + two_a_over_pi * (intvaldt + intvaldt2)
+
+        dmgeps2 = four_a_over_pi * intval
+        dmgdteps = four_a_over_pi * intvaldt
+        dmgdt2 = four_a_over_pi * (intvaldt + intvaldt2)
+
+        return dmeeps2, dmedteps, dmedt2, dmgeps2, dmgdteps, dmgdt2
+
+    def delta_me2(self, tplmev, phie=0.0, m_e=M_ELECTRON):
+        """
+        Electron thermal mass squared, delta m_e^2.
+
+        Parameters
+        ----------
+        tplmev : float
+            Plasma temperature in MeV.
+        phie : float, optional
+            Electron degeneracy mu_e/T_pl. Default is 0.
+        m_e : float, optional
+            Electron mass in MeV. Default is the bare mass.
+
+        Returns
+        -------
+        float
+            Units of MeV^2.
+        """
+        return self.get_eg_mass_renorm(tplmev, phie, m_e=m_e)[0] * tplmev**2
+
+    def delta_mg2(self, tplmev, phie=0.0, m_e=M_ELECTRON):
+        """
+        Photon thermal mass squared, delta m_gamma^2.
+
+        Parameters
+        ----------
+        tplmev : float
+            Plasma temperature in MeV.
+        phie : float, optional
+            Electron degeneracy mu_e/T_pl. Default is 0.
+        m_e : float, optional
+            Electron mass in MeV. Default is the bare mass.
+
+        Returns
+        -------
+        float
+            Units of MeV^2.
+        """
+        return self.get_eg_mass_renorm(tplmev, phie, m_e=m_e)[3] * tplmev**2
+
+    # ---- momentum-dependent electron self-energy -------------------------------------------------
+
+    def get_e_mass_pdep(self, tplmev, phie, peps, m_e=M_ELECTRON):
+        """
+        Momentum-dependent thermal correction to the electron mass and its derivatives.
+
+        The inner integral over the loop momentum is split at the integrable singularity
+        at k = p: a Gauss-Legendre rule reflected about it covers [0, 2p] and a shifted
+        Gauss-Laguerre rule covers [2p, infinity).
+
+        Parameters
+        ----------
+        tplmev : float
+            Plasma temperature in MeV.
+        phie : float
+            Electron degeneracy mu_e/T_pl.
+        peps : float or array
+            Electron momentum p/T_pl, a scalar or of shape (K,).
+        m_e : float, optional
+            Electron mass in MeV. Default is the bare mass.
+
+        Returns
+        -------
+        tuple of float or array
+            (dmep1, dmep2, dmep3, dmep4, dmep5), shaped like ``peps``: delta m_e^2(p)/T_pl^2 and
+            its derivative terms with respect to T_pl, p, T_pl twice, and p and T_pl.
+            Dimensionless; zero at peps = 0.
+        """
+        t_lg, w_lg_c = self.t_lg, self.w_lg
+        t_lag, w_lag_c = self.t_lag, self.w_lag
+
+        peps = jnp.asarray(peps)
+        scalar_in = peps.ndim == 0
+        p = jnp.atleast_1d(peps)[:, None]      # (K,1) outer momenta
+
+        mt = m_e / tplmev
+
+        # Inner abscissas/weights, broadcast over outer nodes -> (K, 2*n_lg + n_lag).
+        y_lg1 = 0.5 * p * (1.0 + t_lg[None, :])         # Legendre [0, peps]      (j=1)
+        y_lg2 = 2.0 * p - y_lg1                         # reflected [peps, 2peps] (j=2, same weights)
+        w_lg = 0.5 * p * w_lg_c[None, :]
+        y_lag = 2.0 * p + t_lag[None, :]                # shifted Laguerre [2peps, inf)
+        w_lag = jnp.broadcast_to(w_lag_c[None, :], y_lag.shape)
+
+        y = jnp.concatenate([y_lg1, y_lg2, y_lag], axis=1)
+        dy = jnp.concatenate([w_lg, w_lg, w_lag], axis=1)
+
+        E = jnp.sqrt(y**2 + mt**2)
+        occ1 = _fd_equil(E, phie)
+        occ2 = _fd_equil(E, -phie)
+        osum = occ1 + occ2
+        # exp(E)·(e^{−φ}occ1² + e^{φ}occ2²), exp argument masked as in get_eg_mass_renorm
+        in_range = E <= _FD_CUTOFF
+        exp_E = jnp.exp(jnp.where(in_range, E, 0.0))
+        osq = jnp.where(in_range,
+                        exp_E * (jnp.exp(-phie) * occ1**2 + jnp.exp(phie) * occ2**2), 0.0)
+
+        # 1/(peps ± y) factors: no node sits on y = peps, and the reflected pairs cancel the pole.
+        d = p - y
+        ip = 1.0 / (p + y)
+        im = jnp.where(d != 0.0, 1.0 / jnp.where(d != 0.0, d, 1.0), 0.0)
+        lg = jnp.log((p + y) / jnp.abs(jnp.where(d != 0.0, d, 1.0)))
+        lg = jnp.where(d != 0.0, lg, 0.0)
+
+        y_in = y < 300.0                                 # occupation cutoff (intval4/5 only)
+
+        intval = jnp.sum(dy * y / E * lg * osum, axis=1)
+        intval2 = jnp.sum(dy * E * (ip + im) * osum, axis=1)
+        intval3 = jnp.sum(dy * y / E * (ip - im) * osum, axis=1)
+        intval4 = jnp.sum(jnp.where(y_in, dy * (y**2 + mt**2) * (ip + im) * osq, 0.0), axis=1)
+        intval5 = jnp.sum(jnp.where(y_in, dy * y * (ip - im) * osq, 0.0), axis=1)
+
+        pref = -(mt**2) * ALPHA_FS / jnp.pi
+        nz = jnp.atleast_1d(peps) != 0.0                 # peps==0 -> dmep = 0
+        dmep1 = jnp.where(nz, pref * intval, 0.0)
+        dmep2 = jnp.where(nz, pref * (intval + intval2), 0.0)
+        dmep3 = jnp.where(nz, pref * intval3, 0.0)
+        dmep4 = jnp.where(nz, pref * intval4, 0.0)
+        dmep5 = jnp.where(nz, pref * intval5, 0.0)
+
+        if scalar_in:
+            return dmep1[0], dmep2[0], dmep3[0], dmep4[0], dmep5[0]
+        return dmep1, dmep2, dmep3, dmep4, dmep5
+
+    # ---- finite-T QED corrections to the e±/γ EoS ------------------------------------------------
+
+    def qed_eos_corrections(self, tplmev, phie=0.0, m_e=M_ELECTRON):
+        """
+        Momentum-independent O(alpha) QED corrections to the plasma equation of state.
+
+        Parameters
+        ----------
+        tplmev : float
+            Plasma temperature in MeV.
+        phie : float, optional
+            Electron degeneracy mu_e/T_pl. Default is 0.
+        m_e : float, optional
+            Electron mass in MeV. Default is the bare mass.
+
+        Returns
+        -------
+        tuple of float
+            (d_rho_gamma, d_P_gamma, d_drho_gamma_dT, d_rho_e, d_P_e, d_drho_e_dT): corrections
+            to the energy density and pressure in MeV^4 and to drho/dT in MeV^3, for the
+            photons and then for the e+e- gas, to be added to the free-gas values.
+        """
+        x, dx = self.x_qed, self.w_qed
+
+        dmeeps2, dmedteps, dmedt2, dmgeps2, dmgdteps, dmgdt2 = self.get_eg_mass_renorm(
+            tplmev, phie, m_e=m_e
+        )
+
+        mt = m_e / tplmev                      # bare m_e / T_pl
+        exm = jnp.sqrt(x**2 + mt**2)           # E / T_pl
+        occ_be = _be(x)                        # photon
+        occ1 = _fd_equil(exm, phie)                  # e- (etadeg = +phie)
+        occ2 = _fd_equil(exm, -phie)                 # e+ (etadeg = -phie)
+        occ_e = occ1 + occ2
+
+        pref4 = tplmev**4 / jnp.pi**2              # ρ, P normalization [MeV⁴]
+        pref3 = tplmev**3 / jnp.pi**2             # dρ/dT normalization [MeV³]
+
+        # --- photon correction pieces ---
+        d_rho_gamma = pref4 * jnp.sum(-dx / 4.0 * x * (dmgeps2 + dmgdteps) * occ_be)
+        d_P_gamma = pref4 * jnp.sum(-dx / 4.0 * x * dmgeps2 * occ_be)
+        d_drho_gamma_dT = pref3 * jnp.sum(
+            -dx / 4.0 * x * (2.0 * dmgeps2 + 4.0 * dmgdteps + dmgdt2) * occ_be
+        )
+
+        # --- electron+positron correction pieces ---
+        d_rho_e = pref4 * jnp.sum(
+            -dx / 4.0 * (exm * dmeeps2 + x**2 / exm * dmedteps) * occ_e
+        )
+        d_P_e = pref4 * jnp.sum(-dx / 4.0 * x**2 / exm * dmeeps2 * occ_e)
+        # exp(exm)·occ², exp argument masked against inf·0 = NaN (exm > 709 below T_pl ≈ 7.2e-4 MeV)
+        in_range = exm <= _FD_CUTOFF
+        exp_exm = jnp.exp(jnp.where(in_range, exm, 0.0))
+        occ_sq = jnp.where(in_range,
+                           exp_exm * (jnp.exp(-phie) * occ1**2 + jnp.exp(phie) * occ2**2), 0.0)
+        d_drho_e_dT = pref3 * jnp.sum(
+            -dx / 4.0 * (2.0 * (2.0 * x**2 + mt**2) / exm * dmedteps + x**2 / exm * dmedt2) * occ_e
+            - dx / 4.0 * exm**2 * dmeeps2 * occ_sq
+        )
+
+        return (d_rho_gamma, d_P_gamma, d_drho_gamma_dT, d_rho_e, d_P_e, d_drho_e_dT)
+
+    def qed_eos_pdep_corrections(self, tplmev, phie=0.0, m_e=M_ELECTRON):
+        """
+        Momentum-dependent O(alpha) QED corrections to the e+e- equation of state.
+
+        Parameters
+        ----------
+        tplmev : float
+            Plasma temperature in MeV.
+        phie : float, optional
+            Electron degeneracy mu_e/T_pl. Default is 0.
+        m_e : float, optional
+            Electron mass in MeV. Default is the bare mass.
+
+        Returns
+        -------
+        tuple of float
+            (d_rho_e, d_P_e, d_drho_e_dT): corrections to the e+e- energy density and
+            pressure in MeV^4 and to drho/dT in MeV^3, to be added to those of
+            ``qed_eos_corrections``.
+
+        Notes
+        -----
+        The derivative of the correction with respect to phi_e is omitted; it is negligible
+        for phi_e ~ 1e-9.
+        """
+        x, dx = self.x_qed, self.w_qed
+
+        mt = m_e / tplmev
+        exm = jnp.sqrt(x**2 + mt**2)
+        occ1 = _fd_equil(exm, phie)
+        occ2 = _fd_equil(exm, -phie)
+        occ_e = occ1 + occ2
+        # exp(exm)·occ², exp argument masked as in qed_eos_corrections
+        in_range = exm <= _FD_CUTOFF
+        exp_exm = jnp.exp(jnp.where(in_range, exm, 0.0))
+        occ_sq = jnp.where(in_range,
+                           exp_exm * (jnp.exp(-phie) * occ1**2 + jnp.exp(phie) * occ2**2), 0.0)
+
+        dmep1, dmep2, dmep3, dmep4, dmep5 = self.get_e_mass_pdep(tplmev, phie, x, m_e=m_e)
+
+        pref4 = tplmev**4 / jnp.pi**2
+        pref3 = tplmev**3 / jnp.pi**2
+
+        d_rho_e = pref4 * jnp.sum(-dx / 4.0 * (x / exm * dmep2 + exm * dmep3) * occ_e)
+        d_P_e = pref4 * jnp.sum(-dx / 4.0 * x / exm * dmep1 * occ_e)
+        d_drho_e_dT = pref3 * jnp.sum(
+            -dx / 4.0 * (2.0 * x / exm * dmep2 + x / exm * dmep4 + 2.0 * exm * dmep5) * occ_e
+            - dx / 4.0 * exm**2 * dmep3 * occ_sq
+        )
+        return d_rho_e, d_P_e, d_drho_e_dT
+
+    def qed_eos_e3_pressure(self, tplmev, m_e=M_ELECTRON):
+        """
+        Next-to-leading-order O(e^3) QED correction to the plasma pressure.
+
+        Equation 4.24 of Bennett et al., arXiv:1911.04504, as implemented in LINX:
+        delta P = (e^3/12 pi^4) T_pl^4 J^(3/2) with J the quadrature of
+        (2x^2 + mt^2)/E * 2/(exp(E) + 1) over x = p/T_pl.
+
+        Parameters
+        ----------
+        tplmev : float
+            Plasma temperature in MeV.
+        m_e : float, optional
+            Electron mass in MeV. Default is the bare mass.
+
+        Returns
+        -------
+        float
+            Units of MeV^4. Exactly zero, with zero derivatives, once the occupation cutoff
+            removes every quadrature node.
+        """
+        x, dx = self.x_qed, self.w_qed
+        mt = m_e / tplmev
+        exm = jnp.sqrt(x**2 + mt**2)
+        in_range = exm <= _FD_CUTOFF                          # exp argument masked against inf/inf
+        fd = jnp.where(in_range, 2.0 / (jnp.exp(jnp.where(in_range, exm, 0.0)) + 1.0), 0.0)
+        jint = jnp.sum(dx * (2.0 * x**2 + mt**2) / exm * fd)  # dimensionless J
+        e3 = (4.0 * jnp.pi * ALPHA_FS) ** 1.5                     # e³
+        # J^{3/2} at J = 0 has an infinite second derivative (inf·0 = NaN): evaluate it at J > 0 only
+        pos = jint > 0.0
+        jint_pos = jnp.where(pos, jint, 1.0)
+        return jnp.where(pos, e3 / (12.0 * jnp.pi**4) * tplmev**4 * jint_pos**1.5, 0.0)
+
+    def qed_eos_e3_deltas(self, tplmev, m_e=M_ELECTRON):
+        """
+        Next-to-leading-order O(e^3) QED corrections to the plasma equation of state.
+
+        delta rho = T dP/dT - P and delta(drho/dT) = T d^2P/dT^2, with the derivatives of
+        ``qed_eos_e3_pressure`` by forward-mode autodiff.
+
+        Parameters
+        ----------
+        tplmev : float
+            Plasma temperature in MeV.
+        m_e : float, optional
+            Electron mass in MeV. Default is the bare mass.
+
+        Returns
+        -------
+        tuple of float
+            (delta_rho, delta_P, delta_drho_dT) in MeV^4, MeV^4 and MeV^3, to be added to
+            the O(alpha) corrections.
+        """
+
+        def _P(T):
+            return self.qed_eos_e3_pressure(T, m_e=m_e)
+
+        def _dP(T):
+            return jax.jvp(_P, (T,), (jnp.ones_like(T),))[1]
+
+        Tp = jnp.asarray(tplmev)
+        P = _P(Tp)
+        dP = _dP(Tp)
+        d2P = jax.jvp(_dP, (Tp,), (jnp.ones_like(Tp),))[1]
+        drho = Tp * dP - P
+        dC = Tp * d2P
+        return drho, P, dC
+
+    def qed_plasma_deltas(self, tplmev, phie=0.0, pdep=True, m_e=M_ELECTRON, nlo=False):
+        """
+        Total QED corrections to the plasma energy density, pressure and heat capacity.
+
+        Parameters
+        ----------
+        tplmev : float
+            Plasma temperature in MeV.
+        phie : float, optional
+            Electron degeneracy mu_e/T_pl. Default is 0.
+        pdep : bool, optional
+            Include the momentum-dependent O(alpha) terms. Default is True.
+        m_e : float, optional
+            Electron mass in MeV. Default is the bare mass.
+        nlo : bool, optional
+            Include the O(e^3) term. Default is False.
+
+        Returns
+        -------
+        tuple of float
+            (delta_rho, delta_P, delta_drho_dT) in MeV^4, MeV^4 and MeV^3, to be added to
+            ``rho_plasma``, ``pressure_plasma`` and ``drho_plasma_dT``.
+        """
+        d = self.qed_eos_corrections(tplmev, phie, m_e=m_e)
+        rho, P, drho = d[0] + d[3], d[1] + d[4], d[2] + d[5]
+        if pdep:
+            dp = self.qed_eos_pdep_corrections(tplmev, phie, m_e=m_e)
+            rho, P, drho = rho + dp[0], P + dp[1], drho + dp[2]
+        if nlo:
+            e3 = self.qed_eos_e3_deltas(tplmev, m_e=m_e)
+            rho, P, drho = rho + e3[0], P + e3[1], drho + e3[2]
+        return rho, P, drho
