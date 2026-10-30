@@ -16,13 +16,14 @@ from __future__ import annotations
 
 import numpy as np
 import diffrax
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 
 from . import compiling
 from .constants import ETA0_DEFAULT, M_ELECTRON
 from .decoupling import make_rhs, make_split_rates, nanrobust_rms_norm, neff_from_spectrum
-from .thermo import Thermo
+from .thermo import Thermo, eta0_from_nb_tcm3
 from .grid import make_eps_grid
 from .transport import assemble as A
 from .transport.nunu import build_nunu_kernel
@@ -86,13 +87,14 @@ def make_hybrid_solver(grid=None, *, thermo=None, lna_sw=1.5, n_head=1600, head_
     -------
     (solve, grid)
         ``solve(T_init=10.0, lna_max=7.5, rtol=1e-6, atol=1e-30, dtmax=0.08, delta_neff_init=0.0,
-        qual_tol=1e-4, me=None, xi=None, eta0=None, q_baryon=None)`` returns the keys of LINX's
-        transport_adapter solver
+        qual_tol=1e-4, me=None, xi=None, eta0=None, q_baryon=None, ratio_today=None,
+        eta_init=None)`` returns the keys of LINX's transport_adapter solver
         (lna, T_pl, T_cm, ratio, f_traj, f_final, ratio_final, neff_final) plus diagnostics:
         ``qualified`` (False: the fallback ran; the result is correct either way), ``qss_dist``
         (max|f − A/B| at the handoff), the head_* sanity checks and tail_steps/tail_rejected/
-        tail_ok.  ``me`` [MeV], ``xi``, ``eta0`` and ``q_baryon`` may be passed per call as traced
-        values (no recompile across values); None means the bare mass and the build-time values.
+        tail_ok.  ``me`` [MeV], ``xi``, ``eta0``, ``q_baryon``, ``ratio_today`` and ``eta_init`` may
+        be passed per call as traced values (no recompile across values), as in
+        :func:`decoupling.make_decoupling_solver`; None means the bare mass and the build-time values.
     """
     if grid is None:
         grid = make_eps_grid()
@@ -125,7 +127,8 @@ def make_hybrid_solver(grid=None, *, thermo=None, lna_sw=1.5, n_head=1600, head_
 
     @jax.jit
     def solve(T_init=10.0, lna_max=7.5, rtol=1e-6, atol=1e-30, dtmax=0.08,
-              delta_neff_init=0.0, qual_tol=1e-4, me=None, xi=None, eta0=None, q_baryon=None):
+              delta_neff_init=0.0, qual_tol=1e-4, me=None, xi=None, eta0=None, q_baryon=None,
+              ratio_today=None, eta_init=None):
         compiling()
         # qual_tol = 1e-4: ~2× the attractor distance at lna_sw = 1.5; rejects handoffs past ~1.7.
         # A passed me reaches the kernels, EoS and QED; it shifts the attractor mildly.
@@ -135,6 +138,10 @@ def make_hybrid_solver(grid=None, *, thermo=None, lna_sw=1.5, n_head=1600, head_
             eta0 = eta0_default
         if q_baryon is None:
             q_baryon = q_baryon_default
+        if eta_init is not None:        # η at T_pl = T_cm fixes n_b/T_cm³ directly
+            eta0, ratio_today = eta_init, 1.0
+        thermo_use = (thermo if ratio_today is None
+                      else eqx.tree_at(lambda t: t.ratio_today, thermo, ratio_today))
         T_init = jnp.asarray(T_init, dtype=jnp.float64)
         # a passed xi recomputes the noise floor and initial state inside the jit
         if xi is None:
@@ -149,7 +156,7 @@ def make_hybrid_solver(grid=None, *, thermo=None, lna_sw=1.5, n_head=1600, head_
                                  renorm_pdep=renorm_pdep, qed_nlo=qed_nlo, tcm_cutoff=tcm_cutoff,
                                  phie=phie, eta0=eta0, q_baryon=q_baryon,
                                  delta_neff_init=delta_neff_init, me=me, lag_tail_fix=lag_tail_fix,
-                                 thermo=thermo)
+                                 thermo=thermo_use)
 
         # ---- expMid head: fixed graded steps over [0, lna_sw] ----
         def body(carry, x):
@@ -189,7 +196,7 @@ def make_hybrid_solver(grid=None, *, thermo=None, lna_sw=1.5, n_head=1600, head_
                        nuratiotol, use_renorm, use_sched=use_sched,
                        renorm_pdep=renorm_pdep, qed_nlo=qed_nlo, tcm_cutoff=tcm_cutoff,
                        phie=phie, eta0=eta0, q_baryon=q_baryon, delta_neff_init=delta_neff_init, me=me,
-                       lag_tail_fix=lag_tail_fix, thermo=thermo)
+                       lag_tail_fix=lag_tail_fix, thermo=thermo_use)
         sol = diffrax.diffeqsolve(
             diffrax.ODETerm(rhs), diffrax.Tsit5(), t0=t0, t1=lna_max, dt0=dt0, y0=y0,
             saveat=diffrax.SaveAt(ts=ts_tail),
@@ -218,6 +225,7 @@ def make_hybrid_solver(grid=None, *, thermo=None, lna_sw=1.5, n_head=1600, head_
         return {"lna": lna, "T_pl": T_pl, "T_cm": T_cm, "ratio": T_pl / T_cm,
                 "f_traj": f_traj, "f_final": f_fin,
                 "ratio_final": T_fin / T_cm_fin,
+                "eta0_final": eta0_from_nb_tcm3(thermo_use.nb_tcm3(eta0), T_fin / T_cm_fin),
                 "neff_final": neff_from_spectrum(grid, f_fin, T_cm_fin, T_fin),
                 "qualified": qualified, "qss_dist": qss_dist,
                 "head_T_ok": T_ok, "head_f_finite": f_finite,

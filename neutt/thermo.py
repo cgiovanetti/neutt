@@ -71,6 +71,26 @@ def nb_over_Tcm3(eta0, ratio_today):
     return n_b0 / T_cm0**3
 
 
+def eta0_from_nb_tcm3(nb_tcm3, ratio_today):
+    """
+    Present baryon-to-photon ratio implied by a comoving baryon density; inverse of
+    ``nb_over_Tcm3``.
+
+    Parameters
+    ----------
+    nb_tcm3 : float
+        Comoving baryon number density n_b/T_cm^3.
+    ratio_today : float
+        T_gamma/T_cm after e+e- annihilation.
+
+    Returns
+    -------
+    float
+        Dimensionless.
+    """
+    return nb_tcm3 / (N_GAMMA * ratio_today**3)
+
+
 def rho_nu(T_nu, n_nu=_N_NU_DEFAULT):
     """
     Energy density of massless thermal neutrinos.
@@ -386,27 +406,6 @@ class Thermo(eqx.Module):
         f = _fd(e, 0.0)
         drho_e = 2.0 * T**3 / jnp.pi**2 * jnp.sum(w * x**2 * (x**2 + z**2) * f * (1.0 - f))
         return 4.0 * jnp.pi**2 * T**3 / 15.0 + drho_e
-
-    def drho_plasma_dT_phi(self, T, phi, m=M_ELECTRON):
-        """
-        Heat capacity drho/dT of the photon and e+e- gas at fixed degeneracy, without QED
-        corrections, by autodiff of ``rho_plasma``.
-
-        Parameters
-        ----------
-        T : float
-            Plasma temperature in MeV.
-        phi : float
-            Electron degeneracy mu_e/T, held fixed in the derivative.
-        m : float, optional
-            Electron mass in MeV. Default is the bare mass.
-
-        Returns
-        -------
-        float
-            Units of MeV^3.
-        """
-        return jax.grad(lambda t: self.rho_plasma(t, phi, m))(T)
 
     # ---- charge-neutral electron degeneracy φ_e --------------------------------------------------
 

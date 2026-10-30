@@ -15,6 +15,7 @@ charge-neutral φ_e(T_pl, T_cm).  ``make_rhs`` gives the vector field for an ada
 from __future__ import annotations
 
 import diffrax
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import optimistix as optx
@@ -22,7 +23,7 @@ import optimistix as optx
 from . import compiling
 from .constants import M_ELECTRON, PI
 from .grid import make_eps_grid
-from .thermo import ETA0_DEFAULT, Thermo, hubble, rho_gamma
+from .thermo import ETA0_DEFAULT, RATIO_TODAY_SM, Thermo, eta0_from_nb_tcm3, hubble, rho_gamma
 from .transport import assemble as A
 from .transport.nunu import build_nunu_kernel
 from .transport.nunubar import build_nunubar_kernel
@@ -253,8 +254,10 @@ def make_decoupling_solver(grid=None, *, n_save=64, max_steps=50_000,
     -------
     (solve, grid)
         ``solve(T_init=10.0, lna_max=7.0, rtol=1e-6, atol=1e-30, dtmax=None, delta_neff_init=0.0,
-        me=None, xi=None, eta0=None, q_baryon=None)`` → dict with ``lna``, ``T_pl``, ``T_cm``, ``ratio`` and ``f_traj``
-        (n_save, 3, 2, N) at the saved states, ``f_final``, ``ratio_final``, ``neff_final``, the
+        me=None, xi=None, eta0=None, q_baryon=None, ratio_today=None, eta_init=None)`` → dict with
+        ``lna``, ``T_pl``, ``T_cm``, ``ratio`` and ``f_traj`` (n_save, 3, 2, N) at the saved states,
+        ``f_final``, ``ratio_final``, ``neff_final``, ``eta0_final`` (the present baryon-to-photon
+        ratio implied by the comoving baryon density used and ``ratio_final``), the
         diffrax solution ``sol``, and ``sumrules`` if requested.
 
         Per-call arguments: ``T_init`` the start T_pl = T_cm [MeV] (neutrinos tightly coupled);
@@ -264,7 +267,9 @@ def make_decoupling_solver(grid=None, *, n_save=64, max_steps=50_000,
         otherwise); ``delta_neff_init`` the inert dark radiation; ``me`` the electron mass (None is
         M_ELECTRON as a compile-time constant); ``xi`` a per-call degeneracy (None keeps the baked
         floor and initial spectrum); ``eta0`` and ``q_baryon`` the present baryon-to-photon ratio
-        and net charge per baryon for ``phie="auto"`` (None: the build-time values).
+        and net charge per baryon for ``phie="auto"`` (None: the build-time values); ``ratio_today``
+        overrides ``Thermo.ratio_today`` (see ``resolve_ratio_today``); ``eta_init`` instead fixes
+        the comoving baryon density directly as η at T_pl = T_cm, with η0 then an output.
     """
     if grid is None:
         grid = make_eps_grid()
@@ -284,7 +289,7 @@ def make_decoupling_solver(grid=None, *, n_save=64, max_steps=50_000,
 
     @jax.jit
     def solve(T_init=10.0, lna_max=7.0, rtol=1e-6, atol=1e-30, dtmax=None, delta_neff_init=0.0,
-              me=None, xi=None, eta0=None, q_baryon=None):
+              me=None, xi=None, eta0=None, q_baryon=None, ratio_today=None, eta_init=None):
         compiling()
         if me is None:
             me = M_ELECTRON
@@ -292,6 +297,10 @@ def make_decoupling_solver(grid=None, *, n_save=64, max_steps=50_000,
             eta0 = eta0_default
         if q_baryon is None:
             q_baryon = q_baryon_default
+        if eta_init is not None:        # η at T_pl = T_cm fixes n_b/T_cm³ directly
+            eta0, ratio_today = eta_init, 1.0
+        thermo_use = (thermo if ratio_today is None
+                      else eqx.tree_at(lambda t: t.ratio_today, thermo, ratio_today))
         if dtmax is None:
             dtmax = dtmax_default
         T_init = jnp.asarray(T_init, dtype=jnp.float64)
@@ -307,7 +316,7 @@ def make_decoupling_solver(grid=None, *, n_save=64, max_steps=50_000,
                        use_sched=use_sched, renorm_pdep=renorm_pdep, qed_nlo=qed_nlo,
                        tcm_cutoff=tcm_cutoff, phie=phie, eta0=eta0, q_baryon=q_baryon,
                        delta_neff_init=delta_neff_init, me=me, lag_tail_fix=lag_tail_fix,
-                       thermo=thermo)
+                       thermo=thermo_use)
         sol = diffrax.diffeqsolve(
             diffrax.ODETerm(rhs), solver, t0=0.0, t1=lna_max, dt0=1e-4,
             y0={"T_pl": T_init, "f": occ_use},
@@ -330,10 +339,11 @@ def make_decoupling_solver(grid=None, *, n_save=64, max_steps=50_000,
             "f_traj": f,
             "neff_final": neff_from_spectrum(grid, f[-1], T_cm[-1], T_pl[-1]),
             "ratio_final": T_pl[-1] / T_cm[-1],
+            "eta0_final": eta0_from_nb_tcm3(thermo_use.nb_tcm3(eta0), T_pl[-1] / T_cm[-1]),
             "sol": sol,
         }
         if sumrules:
-            phie_at = _phie_fn(phie, eta0, q_baryon, me, thermo)
+            phie_at = _phie_fn(phie, eta0, q_baryon, me, thermo_use)
 
             def _sr_one(tc, tp, occ):
                 return A.compute_sumrules(grid, occ, tc, tp, phie_at(tp, tc), prec_use,
@@ -344,3 +354,16 @@ def make_decoupling_solver(grid=None, *, n_save=64, max_steps=50_000,
         return out
 
     return solve, grid
+
+
+def resolve_ratio_today(solve, ratio0=None, tol=1e-8, max_iter=20, **call):
+    """Iterate ``solve(ratio_today=…)`` until the T_γ/T_cm ratio it assumes for n_b equals the one it
+    produces to ``tol`` (relative); each iteration is one warm solve.  Returns ``(ratio, out)``."""
+    ratio = RATIO_TODAY_SM if ratio0 is None else ratio0
+    for _ in range(max_iter):
+        out = solve(ratio_today=ratio, **call)
+        new = float(out["ratio_final"])
+        if abs(new / ratio - 1.0) < tol:
+            return new, out
+        ratio = new
+    raise RuntimeError(f"ratio_today did not converge to {tol:g} in {max_iter} solves (last {ratio!r})")
